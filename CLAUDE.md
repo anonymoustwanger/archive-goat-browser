@@ -24,7 +24,8 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
   `applyDns`, `dnsStatus`), proxy, permissions, tabs (lazy restore, discard via `forcefullyCrashRenderer`,
   memory saver, new-tab pages discarded after 5 s in background, private tabs on the in-memory
   `privSes` partition, wiped when the last closes), tab groups ("folders"), bookmarks
-  (`bookmarks.json`), memory/task list, fingerprint seed, extensions (electron-chrome-extensions +
+  (`bookmarks.json`), history (`history.json`, `recordVisit`, goat://history), main cog menu
+  (`panel/menu.*`), memory/task list, fingerprint seed, extensions (electron-chrome-extensions +
   Chrome Web Store, pin list `settings.extensions.pinned`), popover panels (ad blocker panel, extensions
   menu), window (frameless, `titleBarOverlay` controls in the tab strip), lifecycle.
 - `src/ui/`: toolbar (tabs, folders, address bar, bookmarks bar). `ui.js` talks to main via `window.goat`.
@@ -34,6 +35,26 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
   theme + motion + gradient tokens shared by every surface.
 - `src/pages-preload.js`: exposes `window.goat` only to `goat://newtab` and `goat://settings`; main
   re-checks the sender URL (`fromPage`).
+- `src/tor.js`: built-in Tor. Downloads the Tor Expert Bundle from dist.torproject.org (newest stable dir),
+  verifies `sha256sums-signed-build.txt` with OpenPGP (`openpgp` pkg, pinned Tor Browser key
+  EF6E286DDA85EA2A4BA7DE684E2C6E8793298290 via WKD or keys.openpgp.org), unpacks to `%APPDATA%\Goat Browser\tor`
+  with a built-in tar reader, runs tor.exe with `__OwningControllerProcess`, parses "Bootstrapped N%".
+  `proxyConfig()` returns the Tor SOCKS5 proxy whenever `settings.tor.enabled` (fail-closed while connecting).
+  NEWNYM via ControlPort cookie auth. Download/verify not tested end to end (torproject.org blocked in the
+  build sandbox); launch/bootstrap/NEWNYM tested with a Linux tor.
+- Window modes: `--goat-window=private|tor` (see `MODE`/`EPHEMERAL` at the top of main.js). `openWindow()`
+  spawns a second Goat process; it sets Chromium's userData to `%TEMP%\goat-window-<mode>-<pid>` (single-instance
+  lock is per userData), while `userDir()` stays the main profile for reads. All writes (settings, tabs, history,
+  bookmarks) are skipped when EPHEMERAL, every tab is private, extensions aren't loaded, Tor state goes to the temp
+  dir. Stale temp profiles are removed by `cleanStaleWindowProfiles()`.
+- `src/translate.js`: page translation in isolated world 1729 (collect text nodes + placeholder/title attrs,
+  apply, restore). Engines: Google `translate_a/single?client=gtx` (POST, newline-joined batches) or LibreTranslate.
+  Requests go through the tab's session (`wc.session.fetch`). Google path untested here (blocked in sandbox);
+  LibreTranslate path tested with a mock. `settings.languages` also drives Accept-Language (`acceptLanguage`,
+  plain list, Chromium adds q=), `--lang`, and navigator.language(s) via fp-preload.
+- Privacy toggles (`settings.privacy`): `isolateSites` + `blockPrefetch` also set Chromium features at startup
+  (read early from settings.json as `EARLY`), `trimReferrers`, `blockThirdPartyFonts`, `forgetSites`
+  (`forgetSiteIfClosed`, tracked by `tab.site`).
 - `src/fp-preload.js`: fingerprint shield (standard/strict) and passkey/WebAuthn gate (ask/allow/block)
   for http(s) frames.
 - `scripts/patch-extensions.js`: idempotent string patches to `electron-chrome-extensions` (native
@@ -56,6 +77,6 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
 ## Known gaps / ideas
 - iCloud Passwords: compatibility fixes are in, but it hasn't been confirmed with the real iCloud app.
 - Not verified on real Windows: titlebar buttons in the tab strip, top-edge clicks when maximized.
-- Ideas offered but not built: one-click "Route through Tor" proxy preset, history page, saved
-  passwords, side panel support, chrome.commands.
-- DNS only hides lookups; IP hiding needs a VPN/Tor (explained to owner).
+- Ideas offered but not built: saved passwords, side panel support, chrome.commands, speed tweaks (V8 memory cap,
+  back/forward cache tuning).
+- DNS only hides lookups; IP hiding: built-in Tor (Settings → Tor) or a VPN.

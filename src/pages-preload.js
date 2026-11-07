@@ -21,7 +21,16 @@ if (host) {
   });
 }
 
-if (host === 'newtab') {
+if (host === 'history') {
+  const call = (ch) => (...a) => ipcRenderer.invoke('goat:' + ch, ...a);
+  contextBridge.exposeInMainWorld('goat', {
+    query: call('history-query'),
+    remove: call('history-delete'),
+    clear: call('history-clear'),
+    open: call('history-open'),
+    settings: call('history-settings'),
+  });
+} else if (host === 'newtab') {
   contextBridge.exposeInMainWorld('goat', {
     search: (q) => ipcRenderer.invoke('goat:newtab-search', String(q)),
     bookmarks: () => ipcRenderer.invoke('goat:newtab-bookmarks'),
@@ -46,6 +55,10 @@ if (host === 'newtab') {
     clearBrowsingData: call('clear-data'),
     tasks: { list: call('tasks'), sleep: call('task-sleep'), close: call('task-close') },
     dns: { status: call('dns-status'), openCheck: call('dns-check') },
+    tor: {
+      status: call('tor-status'), newCircuit: call('tor-newcircuit'), check: call('tor-check'),
+      onStatus: (fn) => ipcRenderer.on('goat:tor', (_e, st) => fn(st)),
+    },
     extensions: {
       list: call('ext-list'),
       remove: call('ext-remove'),

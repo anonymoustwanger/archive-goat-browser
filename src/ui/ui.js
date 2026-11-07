@@ -322,6 +322,36 @@ function renderNav() {
     else { sec.innerHTML = ''; sec.title = ''; }
   }
 
+  document.documentElement.dataset.window = state.windowMode || 'normal';
+  const tr = $('trbtn');
+  const tri = t && t.translate;
+  tr.hidden = !tri;
+  if (tri) {
+    tr.className = 'trbtn ' + tri.state;
+    tr.title = {
+      offer: `This page is in ${tri.fromName || 'another language'}. Click to translate to ${tri.to}. Right-click for options.`,
+      working: 'Translating… Click to show the original.',
+      done: `Translated${tri.fromName ? ' from ' + tri.fromName : ''} to ${tri.to}. Click to show the original.`,
+      error: `Couldn't translate: ${tri.error}. Click to try again.`,
+    }[tri.state] || 'Translate';
+    tr.setAttribute('aria-pressed', String(tri.state === 'done'));
+  }
+  const torBtn = $('torbtn');
+  torBtn.hidden = !state.torButton;
+  if (!torBtn.hidden) {
+    const ts = state.tor || 'off';
+    torBtn.className = ts;
+    torBtn.setAttribute('aria-pressed', String(ts !== 'off'));
+    $('torlabel').textContent = ts === 'on' ? 'Tor' : ts === 'off' ? 'Tor' : ts === 'error' ? 'Tor !' : 'Tor…';
+    torBtn.title = {
+      off: 'Tor is off. Click to route everything through Tor. Right-click for options.',
+      on: 'Connected through Tor: sites see a Tor IP, not yours. Click to turn Tor off. Right-click for options.',
+      downloading: 'Downloading Tor… Pages wait until Tor is connected. Click to cancel.',
+      starting: 'Connecting to Tor… Pages wait until Tor is connected. Click to cancel.',
+      error: "Tor isn't working, so pages won't load (nothing leaks). Click to turn Tor off; right-click for settings.",
+    }[ts] || 'Tor';
+  }
+
   const shield = $('shield');
   const isWeb = t && /^https?:/.test(t.url);
   let cls = state.shield;
@@ -393,11 +423,18 @@ $('reload').addEventListener('click', () => {
   const t = active();
   goat.send(t && t.loading ? 'stop' : 'reload');
 });
+$('torbtn').addEventListener('click', () => goat.send('tor-toggle'));
+$('torbtn').addEventListener('contextmenu', (e) => { e.preventDefault(); goat.send('tor-menu'); });
+$('trbtn').addEventListener('click', () => goat.send('translate'));
+$('trbtn').addEventListener('contextmenu', (e) => { e.preventDefault(); goat.send('translate-menu'); });
 $('shield').addEventListener('click', () => {
   const r = $('shield').getBoundingClientRect();
   goat.send('shield', r.right);
 });
-$('settings').addEventListener('click', () => goat.send('settings'));
+$('settings').addEventListener('click', () => {
+  const r = $('settings').getBoundingClientRect();
+  goat.send('app-menu', { x: r.left, y: r.top, width: r.width, height: r.height });
+});
 
 // -------------------------------------------------------------------- find
 function openFind() {

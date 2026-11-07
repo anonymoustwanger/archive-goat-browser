@@ -1,6 +1,6 @@
 {
   "name": "goat-browser",
-  "version": "4.0.0",
+  "version": "4.5.0",
   "description": "Goat Browser: private, fast Chromium browser",
   "main": "src/main.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "@ghostery/adblocker-electron": "^2.20.3",
     "electron-chrome-extensions": "^4.10.0",
     "electron-chrome-web-store": "^0.13.0",
+    "openpgp": "^6.3.2",
     "tldts": "^7.4.19"
   },
   "productName": "Goat Browser"

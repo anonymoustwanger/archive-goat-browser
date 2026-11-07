@@ -13,17 +13,20 @@
   <nav class="side">
     <div class="brand">goat<span>.</span> settings</div>
     <a href="#general">General</a>
+    <a href="#languages">Languages</a>
     <a href="#appearance">Appearance</a>
     <a href="#privacy">Privacy</a>
     <a href="#adblock">Ad blocker</a>
     <a href="#cookies">Cookies</a>
     <a href="#extensions">Extensions</a>
+    <a href="#tor">Tor</a>
     <a href="#proxy">Proxy</a>
     <a href="#data">Clear data</a>
     <a href="#about">About</a>
   </nav>
 
   <div class="content">
+    <p class="winnote" id="winnote" hidden></p>
     <section id="general">
       <h2>General</h2>
       <div class="card">
@@ -66,6 +69,36 @@
             <span class="dnsbtns"><button type="button" id="dnstest">Test again</button><button type="button" id="dnscheck" hidden>Open check page</button></span>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section id="languages">
+      <h2>Languages</h2>
+      <div class="card">
+        <label class="row"><span><b>Website language</b><small>The language sites are asked to show. Helps a lot over Tor, where sites otherwise guess from the Tor exit's country. <em class="restart" data-restart="languages.sites" hidden>Restart Goat to apply everywhere.</em></small></span>
+          <select data-key="languages.sites" class="langselect"></select>
+        </label>
+        <label class="row"><span><b>Translate pages into</b><small>Click the translate button in the address bar, or right-click a page → Translate.</small></span>
+          <select data-key="languages.translateTo" class="langselect"></select>
+        </label>
+        <label class="row"><span><b>Offer to translate</b><small>Shows the translate button when a page is in another language.</small></span>
+          <input type="checkbox" class="toggle" data-key="languages.offer">
+        </label>
+        <label class="row"><span><b>Always translate</b><small>Pages in other languages are translated as soon as they load.</small></span>
+          <input type="checkbox" class="toggle" data-key="languages.auto">
+        </label>
+        <div class="row col">
+          <span><b>Translation service</b><small>The page's text is sent to this service to be translated. Private and Tor windows send it through Tor or their own session.</small></span>
+          <div class="radios">
+            <label><input type="radio" name="tre" value="libre" data-key="languages.engine"> <span><b>LibreTranslate</b><small>Open source, so Google sees nothing. libretranslate.com needs an API key (get one at portal.libretranslate.com); or use your own server or another public one.</small></span></label>
+            <label><input type="radio" name="tre" value="google" data-key="languages.engine"> <span><b>Google Translate</b><small>Free, no key. Google sees the text you translate (not your cookies).</small></span></label>
+          </div>
+          <div class="grid" id="librefields" hidden>
+            <label class="wide">LibreTranslate address <input data-key="languages.libreUrl" placeholder="https://libretranslate.com" spellcheck="false"></label>
+            <label class="wide">API key <input data-key="languages.libreKey" placeholder="optional" spellcheck="false" autocomplete="off"></label>
+          </div>
+        </div>
+        <p class="hint">Goat's own menus are in English.</p>
       </div>
     </section>
 
@@ -125,6 +158,12 @@
       <h2>Privacy</h2>
       <div class="card">
         <div class="row col">
+          <span><b>Profile</b><small>Sets the speed-vs-privacy switches in one click: preloading, keeping sites separate, font blocking, fingerprint protection, ad blocking level and DNS. You can still change any of them below. <em class="restart" id="profrestart" hidden>Restart Goat to apply fully.</em></small></span>
+          <div class="profiles" id="profiles" role="radiogroup" aria-label="Settings profile"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row col">
           <span><b>Fingerprint protection</b><small>Stops sites from identifying your device by its hardware, GPU and browser details.</small></span>
           <div class="radios">
             <label><input type="radio" name="fp" value="off" data-key="privacy.fingerprint"> <span><b>Off</b></span></label>
@@ -140,9 +179,41 @@
             <label><input type="radio" name="wa" value="block" data-key="privacy.webauthn"> <span><b>Block</b><small>Never use passkeys or security keys. Sites fall back to passwords or codes.</small></span></label>
           </div>
         </div>
+        <label class="row"><span><b>History</b><small>Pages you visit in normal tabs. Private tabs are never saved. <a href="goat://history/" class="inlink">Open history</a></small></span>
+          <select data-key="history.keepDays" data-number="1">
+            <option value="0">Don't save history</option>
+            <option value="7">Keep for 7 days</option>
+            <option value="30">Keep for 30 days</option>
+            <option value="90">Keep for 90 days</option>
+            <option value="365">Keep for 1 year</option>
+            <option value="-1">Keep forever</option>
+          </select>
+        </label>
         <label class="row"><span><b>Remove tracking from links</b><small>Strips tags like utm_source, fbclid and gclid from addresses you open.</small></span>
           <input type="checkbox" class="toggle" data-key="privacy.stripTracking">
         </label>
+        <label class="row"><span><b>Keep sites separate</b><small>Each site gets its own storage, cache and connections, so embedded trackers can't recognize you across sites. <em class="restart" data-restart="privacy.isolateSites" hidden>Restart Goat to apply.</em></small></span>
+          <input type="checkbox" class="toggle" data-key="privacy.isolateSites">
+        </label>
+        <label class="row"><span><b>Trim referrers</b><small>When you open another site, it isn't told which page you came from. Things loaded from other servers only see the site name, not the page.</small></span>
+          <input type="checkbox" class="toggle" data-key="privacy.trimReferrers">
+        </label>
+        <label class="row"><span><b>No background preloading</b><small>Sites can't load pages you haven't clicked yet, and Goat doesn't open early connections. Pages may open a little slower. <em class="restart" data-restart="privacy.blockPrefetch" hidden>Restart Goat to apply fully.</em></small></span>
+          <input type="checkbox" class="toggle" data-key="privacy.blockPrefetch">
+        </label>
+        <label class="row"><span><b>Block fonts from other sites</b><small>Stops font services (like Google Fonts) from seeing which sites you visit. Some icons may show as boxes; pause the ad blocker on a site to allow them there.</small></span>
+          <input type="checkbox" class="toggle" data-key="privacy.blockThirdPartyFonts">
+        </label>
+      </div>
+
+      <h3>Forget when closed</h3>
+      <div class="card">
+        <p class="hint">When the last tab of one of these sites closes, its cookies and saved data are deleted. You can also right-click a tab → "Forget … when closed".</p>
+        <form class="inline" id="forgetform">
+          <input id="forgetinput" placeholder="example.com" spellcheck="false">
+          <button>Add</button>
+        </form>
+        <ul class="chips" id="forgetlist"></ul>
       </div>
       <h3>Performance</h3>
       <div class="card">
@@ -180,6 +251,9 @@
             <label><input type="radio" name="level" value="strict" data-key="adblock.level"> <span><b>Strict</b><small>Also cookie banners, popups and other annoyances. May break some sites.</small></span></label>
           </div>
         </div>
+        <label class="row"><span><b>Don't block extensions</b><small>Extensions' own requests (password managers, translators, sync) skip the ad blocker, so it can't break them. Ads on websites are still blocked.</small></span>
+          <input type="checkbox" class="toggle" data-key="adblock.skipExtensions">
+        </label>
         <div class="row">
           <span><b>Update blocklists</b><small>Lists refresh weekly on their own.</small></span>
           <button id="abrefresh">Update now</button>
@@ -240,6 +314,23 @@
       </div>
     </section>
 
+    <section id="tor">
+      <h2>Tor</h2>
+      <div class="card">
+        <label class="row"><span><b>Route everything through Tor</b><small>Hides your IP address: sites see a Tor address instead. No Tor Browser needed. The first time, Goat downloads Tor (about 15&nbsp;MB) from torproject.org and checks its signature. Pages are slower, and some sites block Tor or show more captchas. While Tor is connecting or broken, pages don't load at all, so your real IP never leaks.</small></span>
+          <input type="checkbox" class="toggle" data-key="tor.enabled">
+        </label>
+        <label class="row"><span><b>Tor button in the toolbar</b><small>A button to turn Tor on and off with one click. It always shows while Tor is on.</small></span>
+          <input type="checkbox" class="toggle" data-key="tor.showButton">
+        </label>
+        <div class="row">
+          <span><b>Status</b><small id="torstate" class="muted">Off</small></span>
+          <span class="dnsbtns"><button type="button" id="tornew" disabled>New circuit</button><button type="button" id="torcheck" disabled>Check</button></span>
+        </div>
+        <p class="hint">Tor replaces the proxy below while it's on. "New circuit" gives new connections a different Tor IP. Tor hides your IP, but it isn't Tor Browser: logging in to sites still identifies you.</p>
+      </div>
+    </section>
+
     <section id="proxy">
       <h2>Proxy</h2>
       <div class="card">
@@ -278,7 +369,7 @@
       <h2>Clear data</h2>
       <div class="card">
         <div class="row">
-          <span><b>Clear all browsing data</b><small>Deletes cookies, cache, site storage, and closes all tabs. Settings are kept.</small></span>
+          <span><b>Clear all browsing data</b><small>Deletes history, cookies, cache, site storage, and closes all tabs. Settings and bookmarks are kept.</small></span>
           <button class="danger" id="cleardata">Clear everything</button>
         </div>
       </div>

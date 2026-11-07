@@ -6,7 +6,7 @@
 
 const {
   app, BaseWindow, WebContentsView, session, ipcMain, Menu, dialog,
-  clipboard, protocol, net, safeStorage, nativeTheme, webContents: allWebContents,
+  clipboard, protocol, net, safeStorage, nativeTheme, webContents: allWebContents, shell,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -15,11 +15,51 @@ const { parse: parseDomain } = require('tldts');
 const { ElectronBlocker } = require('@ghostery/adblocker-electron');
 const { ElectronChromeExtensions } = require('electron-chrome-extensions');
 const { installChromeWebStore, uninstallExtension } = require('electron-chrome-web-store');
+const { Tor } = require('./tor');
+const { Translator, LANGUAGES, acceptLanguage, sameLang } = require('./translate');
+
+// ---------------------------------------------------------------- window mode
+// Private and Tor windows run as their own Goat process with a throwaway Chromium
+// profile in %TEMP%. They read your settings, bookmarks and blocklists from the
+// main profile but never write history, tabs, cookies or settings back.
+const MODE = (() => {
+  const a = process.argv.find((x) => x.startsWith('--goat-window='));
+  const m = a ? a.split('=')[1] : 'normal';
+  return ['private', 'tor'].includes(m) ? m : 'normal';
+})();
+const EPHEMERAL = MODE !== 'normal';
+const MAIN_DIR = app.getPath('userData');
+const TEMP_PREFIX = 'goat-window-';
+if (EPHEMERAL) {
+  const tmp = path.join(app.getPath('temp'), `${TEMP_PREFIX}${MODE}-${process.pid}`);
+  fs.mkdirSync(tmp, { recursive: true });
+  app.setPath('userData', tmp);
+  app.setPath('sessionData', tmp);
+}
+// Remove temp profiles left by private/Tor windows that are no longer running.
+function cleanStaleWindowProfiles() {
+  let names = [];
+  try { names = fs.readdirSync(app.getPath('temp')); } catch { return; }
+  for (const n of names) {
+    const m = new RegExp(`^${TEMP_PREFIX}(private|tor)-(\\d+)$`).exec(n);
+    if (!m || Number(m[2]) === process.pid) continue;
+    let alive = false;
+    try { process.kill(Number(m[2]), 0); alive = true; } catch { /* not running */ }
+    if (!alive) fs.rm(path.join(app.getPath('temp'), n), { recursive: true, force: true }, () => {});
+  }
+}
+function openWindow(mode) {
+  const args = [...(process.defaultApp ? [process.argv[1]] : []), `--goat-window=${mode}`];
+  try {
+    require('child_process').spawn(process.execPath, args, { detached: true, stdio: 'ignore' }).unref();
+  } catch (err) { toast(`Couldn't open window: ${err.message}`); }
+}
 
 // ------------------------------------------------------------------ constants
 const SCHEME = 'goat';
 const NEWTAB_URL = `${SCHEME}://newtab/`;
 const SETTINGS_URL = `${SCHEME}://settings/`;
+const HISTORY_URL = `${SCHEME}://history/`;
 const PAGES_DIR = path.join(__dirname, 'pages');
 const TOOLBAR_HEIGHT = 82;
 const BOOKMARKS_BAR_HEIGHT = 32;
@@ -50,7 +90,6 @@ const BLOCK_LEVELS = {
   strict: 'fromPrebuiltFull',
 };
 const THEMES = {
-  goat: { scheme: 'dark', bg: '#101214', text: '#e7e9ec', name: 'Goat' },
   midnight: { scheme: 'dark', bg: '#101214', text: '#e7e9ec', name: 'Midnight' },
   daylight: { scheme: 'light', bg: '#eef0f3', text: '#16191d', name: 'Daylight' },
   forest: { scheme: 'dark', bg: '#0f1511', text: '#e4ece5', name: 'Forest' },
@@ -60,21 +99,48 @@ const THEMES = {
   mono: { scheme: 'dark', bg: '#0c0c0c', text: '#f2f2f2', name: 'Mono' },
   paper: { scheme: 'light', bg: '#f4efe6', text: '#2a241c', name: 'Paper' },
 };
+// Settings profiles (Settings → Privacy). Each sets only the speed-vs-privacy switches below.
+const PROFILES = {
+  fastest: {
+    name: 'Fastest', desc: 'Like Chrome with an ad blocker. Pages preload and connections are reused across sites. Cloudflare DNS.',
+    patch: { privacy: { blockPrefetch: false, isolateSites: false, blockThirdPartyFonts: false, fingerprint: 'standard', trimReferrers: true }, adblock: { level: 'standard' }, dns: { provider: 'cloudflare' } },
+  },
+  balanced: {
+    name: 'Balanced', desc: 'Sites kept separate, no background preloading, Quad9 DNS. The default.',
+    patch: { privacy: { blockPrefetch: true, isolateSites: true, blockThirdPartyFonts: false, fingerprint: 'standard', trimReferrers: true }, adblock: { level: 'standard' }, dns: { provider: 'quad9' } },
+  },
+  private: {
+    name: 'Most private', desc: 'No preloading, sites kept separate, fonts from other sites blocked, strict fingerprint and ad blocking, Mullvad DNS. Slower, and a few sites may break.',
+    patch: { privacy: { blockPrefetch: true, isolateSites: true, blockThirdPartyFonts: true, fingerprint: 'strict', trimReferrers: true }, adblock: { level: 'strict' }, dns: { provider: 'mullvad' } },
+  },
+};
 const CONTROLS_HEIGHT = 38; // native min/max/close sit in the tab strip
 const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'];
 
 const DEFAULT_SETTINGS = {
   searchEngine: 'duckduckgo',
   restoreTabs: true,
-  privacy: { fingerprint: 'standard', stripTracking: true, webauthn: 'ask' },
+  history: { keepDays: 90 }, // 0 = don't save, -1 = forever
+  privacy: {
+    fingerprint: 'standard', stripTracking: true, webauthn: 'ask',
+    isolateSites: true, // partition storage, cache and connections per site (restart)
+    trimReferrers: true, // other sites only see the site you came from, or nothing
+    blockPrefetch: true, // no background loading of pages you haven't opened
+    blockThirdPartyFonts: false, // fonts from other servers (can break icons)
+    forgetSites: [], // cookies + storage deleted when the site's last tab closes
+  },
+  tor: { enabled: false, showButton: false }, // showButton: Tor on/off button in the toolbar
+  // sites: language websites are asked for (Accept-Language, navigator.language).
+  // translateTo: language pages are translated into. engine: google | libre.
+  languages: { sites: 'en', translateTo: 'en', offer: true, auto: false, engine: 'libre', libreUrl: 'https://libretranslate.com', libreKey: '' },
   performance: { sleepAfterMin: 30 },
   showBookmarksBar: true,
-  appearance: { theme: 'goat', motion: 'system', gradients: true, customThemes: [] },
+  appearance: { theme: 'system', motion: 'system', gradients: true, customThemes: [] },
   stats: { blocked: 0 },
   httpsOnly: true,
   secureDns: true,
   dns: { provider: 'quad9', nextdnsId: '', custom: '' },
-  adblock: { enabled: true, level: 'standard', allowlist: [], customRules: '' },
+  adblock: { enabled: true, level: 'standard', allowlist: [], customRules: '', skipExtensions: true }, // skipExtensions: never filter extensions' own requests
   cookies: { blockThirdParty: true, clearOnExit: false },
   extensions: { unpacked: [], hidden: [], pinned: null }, // pinned: ids shown in the toolbar
   proxy: { mode: 'system', type: 'socks5', host: '', port: '', bypass: '<local>', pacUrl: '', username: '', password: '' },
@@ -88,7 +154,23 @@ app.commandLine.appendSwitch('no-pings');
 app.commandLine.appendSwitch('enable-parallel-downloading');
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-zero-copy');
+// Settings that need to be known before Chromium starts (restart to change).
+const EARLY = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(MAIN_DIR, 'settings.json'), 'utf8')); } catch { return {}; }
+})();
+{ const l = EARLY.languages && EARLY.languages.sites; if (l && LANGUAGES[l]) app.commandLine.appendSwitch('lang', l); }
+const EARLY_ISOLATE = !(EARLY.privacy && EARLY.privacy.isolateSites === false);
+const EARLY_PREFETCH_OFF = !(EARLY.privacy && EARLY.privacy.blockPrefetch === false);
+if (EARLY_ISOLATE) {
+  app.commandLine.appendSwitch('enable-features', [
+    'ThirdPartyStoragePartitioning', 'SplitCacheByNetworkIsolationKey', 'SplitCodeCacheByNetworkIsolationKey',
+    'PartitionConnectionsByNetworkIsolationKey', 'PartitionedCookies', 'PartitionNelAndReportingByNetworkIsolationKey',
+    'PartitionDomainReliabilityByNetworkIsolationKey', 'StrictOriginIsolation',
+  ].join(','));
+}
 app.commandLine.appendSwitch('disable-features', [
+  ...(EARLY_ISOLATE ? ['StorageAccessAPI', 'StorageAccessHeaders'] : []),
+  ...(EARLY_PREFETCH_OFF ? ['Prerender2', 'SpeculationRulesPrefetchFuture', 'NavigationPredictor', 'PrefetchPrivacyChanges'] : []),
   'AutofillServerCommunication', 'MediaRouter', 'OptimizationHints', 'Translate',
   // Privacy Sandbox ad APIs: no interest groups, topics or attribution reports.
   'BrowsingTopics', 'InterestGroupStorage', 'Fledge', 'AdInterestGroupAPI', 'PrivacySandboxAdsAPIs',
@@ -109,6 +191,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 // ---------------------------------------------------------------------- state
+let tor = null; // created once userData is known (see lifecycle)
 let win = null;
 let ui = null;
 let ses = null;
@@ -136,7 +219,7 @@ const allowHttp = new Set();
 const upgradedHosts = new Set();
 const permDecisions = new Map();
 
-const userDir = () => app.getPath('userData');
+const userDir = () => MAIN_DIR; // your profile files (read-only in private/Tor windows)
 const settingsFile = () => path.join(userDir(), 'settings.json');
 const sessionFile = () => path.join(userDir(), 'tabs.json');
 
@@ -154,14 +237,31 @@ function loadSettings() {
   let raw = {};
   try { raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { /* first run */ }
   settings = merge(DEFAULT_SETTINGS, raw);
+  // 4.4: LibreTranslate became the default translation service.
+  if (!raw.v44) {
+    settings.v44 = true;
+    settings.languages.engine = 'libre';
+    if (!settings.languages.libreUrl) settings.languages.libreUrl = DEFAULT_SETTINGS.languages.libreUrl;
+  }
+  if (!raw.languages) {
+    // First run: use Windows' language, so sites (and translation) match you.
+    const loc = app.getLocale();
+    const code = LANGUAGES[loc] ? loc : LANGUAGES[loc.split('-')[0]] ? loc.split('-')[0] : 'en';
+    settings.languages.sites = code;
+    settings.languages.translateTo = code === 'en-GB' ? 'en' : code;
+  }
   // Older versions had a single on/off switch.
   if (!raw.dns && raw.secureDns === false) settings.dns.provider = 'off';
+  // Themes that no longer exist (e.g. the removed "Goat" theme) fall back to System.
+  const th = settings.appearance.theme;
+  if (th !== 'system' && !THEMES[th] && !(settings.appearance.customThemes || []).some((c) => c && c.id === th)) settings.appearance.theme = 'system';
 }
 
 let saveTimer = null;
 function saveSettings() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    if (EPHEMERAL) return;
     fs.mkdirSync(userDir(), { recursive: true });
     fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
   }, 200);
@@ -202,7 +302,22 @@ async function applySettings(patch) {
   settings.appearance.gradients = settings.appearance.gradients !== false;
   if (!['off', 'standard', 'strict'].includes(settings.privacy.fingerprint)) settings.privacy.fingerprint = 'standard';
   settings.privacy.stripTracking = settings.privacy.stripTracking !== false;
+  settings.adblock.skipExtensions = settings.adblock.skipExtensions !== false;
+  if (![0, 7, 30, 90, 365, -1].includes(Number(settings.history.keepDays))) settings.history.keepDays = 90;
+  settings.history.keepDays = Number(settings.history.keepDays);
   if (!['ask', 'allow', 'block'].includes(settings.privacy.webauthn)) settings.privacy.webauthn = 'ask';
+  for (const k of ['isolateSites', 'trimReferrers', 'blockPrefetch', 'blockThirdPartyFonts']) settings.privacy[k] = !!settings.privacy[k];
+  settings.privacy.forgetSites = [...new Set((Array.isArray(settings.privacy.forgetSites) ? settings.privacy.forgetSites : []).map(normalizeSite).filter(Boolean))];
+  settings.tor.enabled = MODE === 'tor' || !!settings.tor.enabled;
+  settings.tor.showButton = !!settings.tor.showButton;
+  { const L = settings.languages;
+    if (!LANGUAGES[L.sites]) L.sites = 'en';
+    if (!LANGUAGES[L.translateTo]) L.translateTo = 'en';
+    L.offer = L.offer !== false; L.auto = !!L.auto;
+    if (!['google', 'libre'].includes(L.engine)) L.engine = 'google';
+    L.libreUrl = String(L.libreUrl || '').trim().slice(0, 300);
+    if (L.libreUrl && !/^https?:\/\//.test(L.libreUrl)) L.libreUrl = 'https://' + L.libreUrl;
+    L.libreKey = String(L.libreKey || '').trim().slice(0, 200); }
   if (settings.dns.provider !== 'off' && !DNS_PROVIDERS[settings.dns.provider]) settings.dns.provider = 'quad9';
   settings.dns.nextdnsId = String(settings.dns.nextdnsId || '').trim().replace(/[^a-z0-9]/gi, '').slice(0, 20);
   settings.dns.custom = String(settings.dns.custom || '').trim().slice(0, 300);
@@ -211,21 +326,41 @@ async function applySettings(patch) {
   if (JSON.stringify(settings) === before) return publicSettings();
   saveSettings();
 
-  if (JSON.stringify(old.proxy) !== JSON.stringify(settings.proxy)) await applyProxy();
+  if (old.tor.enabled !== settings.tor.enabled) {
+    if (settings.tor.enabled) tor.start(); else tor.stop();
+    await applyProxy();
+  } else if (JSON.stringify(old.proxy) !== JSON.stringify(settings.proxy)) await applyProxy();
   if (JSON.stringify(old.dns) !== JSON.stringify(settings.dns)) applyDns();
+  if (old.languages.sites !== settings.languages.sites) for (const x of allSessions()) x.setUserAgent(USER_AGENT, acceptLanguage(settings.languages.sites));
+  if (old.languages.translateTo !== settings.languages.translateTo || old.languages.offer !== settings.languages.offer) {
+    for (const t of tabs.values()) if (!t.tr || t.tr.state === 'offer' || t.tr.state === 'none') checkTranslate(t);
+  }
   if (JSON.stringify(old.appearance) !== JSON.stringify(settings.appearance)) applyAppearance();
   if (old.showBookmarksBar !== settings.showBookmarksBar) { layout(); scheduleState(); }
+  if (old.history.keepDays !== settings.history.keepDays) pruneHistory(true);
   const ab = (o) => JSON.stringify({ e: o.adblock.enabled, l: o.adblock.level, r: o.adblock.customRules });
   if (ab(old) !== ab(settings)) blockerPromise = reloadBlocker();
   if (JSON.stringify(old.adblock.allowlist) !== JSON.stringify(settings.adblock.allowlist)) scheduleState();
+  if (old.tor.showButton !== settings.tor.showButton) scheduleState();
   return publicSettings();
 }
 
 function searchUrl(q) { return SEARCH_ENGINES[settings.searchEngine] + encodeURIComponent(q); }
 
 // -------------------------------------------------------------------- helpers
+// Site (eTLD+1) of a URL, cached by host: called several times per network request.
+const siteCache = new Map();
 function siteOf(url) {
-  try { const p = parseDomain(url); return p.domain || p.hostname || null; } catch { return null; }
+  let host;
+  try { host = new URL(url).host; } catch { host = null; }
+  if (host && siteCache.has(host)) return siteCache.get(host);
+  let site = null;
+  try { const p = parseDomain(url); site = p.domain || p.hostname || null; } catch { site = null; }
+  if (host) {
+    if (siteCache.size > 4000) siteCache.clear();
+    siteCache.set(host, site);
+  }
+  return site;
 }
 function normalizeSite(s) {
   const t = String(s || '').trim().toLowerCase();
@@ -251,6 +386,15 @@ function isThirdParty(details) {
   const b = siteOf(top);
   return !!(a && b && a !== b);
 }
+// Requests made by an extension itself (its background worker, popup or options page).
+function fromExtension(details) {
+  if (/^chrome-extension:/.test(details.initiatorOrigin || '')) return true;
+  if (/^chrome-extension:/.test(details.referrer || '')) return true;
+  try { if (details.frame && /^chrome-extension:/.test(details.frame.url)) return true; } catch { /* frame gone */ }
+  const top = topUrlFor(details);
+  return !!(top && top.startsWith('chrome-extension:'));
+}
+const skipForExtension = (details) => settings.adblock.skipExtensions && fromExtension(details);
 function isAllowlisted(url) {
   const s = siteOf(url);
   return !!s && settings.adblock.allowlist.includes(s);
@@ -329,7 +473,11 @@ function onBeforeRequest(details, callback) {
       }
     } catch { /* fall through */ }
   }
-  if (!blocker || !/^(https?|wss?):/.test(url)) { callback({}); return; }
+  if (settings.privacy.blockThirdPartyFonts && details.resourceType === 'font' && /^https?:/.test(url) && isThirdParty(details) && !skipForExtension(details)) {
+    const t = topUrlFor(details);
+    if (!(t && isAllowlisted(t))) { callback({ cancel: true }); return; }
+  }
+  if (!blocker || !/^(https?|wss?):/.test(url) || skipForExtension(details)) { callback({}); return; }
   const top = topUrlFor(details);
   if (top && isAllowlisted(top)) { callback({}); return; }
   blocker.onBeforeRequest(details, (res) => {
@@ -356,9 +504,18 @@ function onBeforeSendHeaders(details, callback) {
     }
   }
   if (settings.cookies.blockThirdParty && isThirdParty(details)) deleteHeader(h, 'cookie');
-  if (details.resourceType === 'mainFrame') {
+  if (settings.privacy.blockPrefetch) {
+    const purpose = Object.keys(h).find((k) => /^(sec-)?purpose$/i.test(k));
+    if (purpose && /prefetch|prerender/i.test(h[purpose])) { callback({ cancel: true }); return; }
+  }
+  if (settings.privacy.trimReferrers) {
     const ref = Object.keys(h).find((k) => k.toLowerCase() === 'referer');
-    if (ref && siteOf(h[ref]) !== siteOf(details.url)) delete h[ref];
+    if (ref && siteOf(h[ref]) !== siteOf(details.url)) {
+      // Opening another site: it doesn't learn where you came from.
+      // Loading things from other sites: they only see the site, not the page.
+      if (details.resourceType === 'mainFrame') delete h[ref];
+      else { const o = originOf(h[ref]); if (/^https?:/.test(o)) h[ref] = o + '/'; else delete h[ref]; }
+    }
   }
   callback({ requestHeaders: h });
 }
@@ -376,13 +533,14 @@ function onHeadersReceived(details, callback) {
     callback(changed ? { responseHeaders: headers } : {});
   };
   const top = topUrlFor(details);
-  if (blocker && /^https?:/.test(details.url) && !(top && isAllowlisted(top))) {
+  if (blocker && /^https?:/.test(details.url) && !(top && isAllowlisted(top)) && !skipForExtension(details)) {
     blocker.onHeadersReceived(details, finish);
   } else finish({});
 }
 
 function attachRequestHandlers() {
-  const filter = { urls: ['<all_urls>'] };
+  // Only web traffic goes through Goat's filters; goat://, extension, data: and blob: URLs skip the round trip.
+  const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] };
   for (const s of allSessions()) {
     s.webRequest.onBeforeRequest(filter, onBeforeRequest);
     s.webRequest.onBeforeSendHeaders(filter, onBeforeSendHeaders);
@@ -503,7 +661,7 @@ function themeInfo(id) {
 
 function appearance() {
   const t = settings.appearance.theme;
-  const id = t === 'system' || !themeInfo(t) ? (nativeTheme.shouldUseDarkColors ? 'goat' : 'daylight') : t;
+  const id = t === 'system' || !themeInfo(t) ? (nativeTheme.shouldUseDarkColors ? 'midnight' : 'daylight') : t;
   const info = themeInfo(id);
   return {
     theme: info.custom ? 'custom' : id,
@@ -567,6 +725,8 @@ function applyDns() {
 }
 
 function proxyConfig() {
+  // Tor on: everything goes through Tor, or nowhere while it connects (no leaks).
+  if (settings.tor.enabled) return { mode: 'fixed_servers', proxyRules: `socks5://127.0.0.1:${tor.port || 9155}`, proxyBypassRules: '' };
   const p = settings.proxy;
   if (p.mode === 'direct') return { mode: 'direct' };
   if (p.mode === 'manual' && p.host && p.port) {
@@ -636,7 +796,7 @@ function onPermissionCheck(_wc, permission, requestingOrigin) {
 const allSessions = () => [ses, privSes].filter(Boolean);
 
 function configureSession(s) {
-  s.setUserAgent(USER_AGENT, 'en-US,en;q=0.9');
+  s.setUserAgent(USER_AGENT, acceptLanguage(settings.languages.sites));
   s.setSpellCheckerEnabled(false);
   s.setPermissionRequestHandler(onPermissionRequest);
   s.setPermissionCheckHandler(onPermissionCheck);
@@ -662,11 +822,23 @@ function serveInternal(req) {
 }
 
 function setupSession() {
-  ses = session.fromPartition('persist:goat'); // cookies & site data survive restarts
+  ses = session.fromPartition(EPHEMERAL ? 'goat-window' : 'persist:goat'); // normal: cookies & site data survive restarts
   privSes = session.fromPartition('goat-private'); // no "persist:" = memory only
   configureSession(ses);
   configureSession(privSes);
   attachRequestHandlers();
+}
+
+// "Forget when closed": once no normal tab shows the site, its cookies and storage go.
+async function forgetSiteIfClosed(site) {
+  if (!site || !settings.privacy.forgetSites.includes(site)) return;
+  for (const t of tabs.values()) if (!t.private && t.site === site) return;
+  const all = await ses.cookies.get({}).catch(() => []);
+  const mine = all.filter((c) => siteOf('https://' + c.domain.replace(/^\./, '')) === site);
+  await Promise.allSettled(mine.map((c) => ses.cookies.remove(cookieUrl(c), c.name)));
+  const hosts = new Set([site, 'www.' + site, ...mine.map((c) => c.domain.replace(/^\./, ''))]);
+  const storages = ['filesystem', 'indexdb', 'localstorage', 'shadercache', 'websql', 'serviceworkers', 'cachestorage'];
+  await Promise.allSettled([...hosts].flatMap((h) => ['https://', 'http://'].map((pre) => ses.clearStorageData({ origin: pre + h, storages }))));
 }
 
 // Private tabs share one in-memory session; when the last one closes it is wiped.
@@ -680,6 +852,7 @@ async function wipePrivateIfUnused() {
 
 // ----------------------------------------------------------------------- tabs
 function createTab(url, { activate = true, groupId = null, position = 'afterActive', lazy = false, private: isPrivate = false } = {}) {
+  if (EPHEMERAL) isPrivate = true; // private/Tor windows: every tab is private
   const id = nextId++;
   const view = new WebContentsView({
     webPreferences: {
@@ -758,15 +931,23 @@ function wireTab(tab) {
     child.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   });
 
-  wc.on('page-title-updated', (_e, title) => { tab.title = title; scheduleState(); });
+  wc.on('page-title-updated', (_e, title) => { tab.title = title; updateHistoryTitle(tab, title); scheduleState(); });
   wc.on('did-start-loading', scheduleState);
-  wc.on('did-stop-loading', () => { scheduleState(); saveTabsSoon(); });
-  wc.on('did-navigate', (_e, navUrl) => {
+  wc.on('did-stop-loading', () => { scheduleState(); saveTabsSoon(); checkTranslate(tab); });
+  wc.on('did-navigate', (_e, navUrl, httpCode) => {
     tab.title = '';
+    stopTranslateWatch(tab);
+    tab.tr = null;
+    if (!tab.private && /^https?:/.test(navUrl)) {
+      const prevSite = tab.site;
+      tab.site = siteOf(navUrl);
+      if (prevSite && prevSite !== tab.site) setImmediate(() => forgetSiteIfClosed(prevSite));
+    }
+    if (!(httpCode >= 400)) recordVisit(tab, navUrl);
     tab.view.setBackgroundColor(/^https?:/i.test(navUrl) ? '#ffffff' : appearance().bg);
     scheduleState();
   });
-  wc.on('did-navigate-in-page', scheduleState);
+  wc.on('did-navigate-in-page', (_e, navUrl, isMainFrame) => { if (isMainFrame) recordVisit(tab, navUrl, true); scheduleState(); });
   wc.on('did-start-navigation', (d) => {
     if (d.isMainFrame && !d.isSameDocument) { tab.blocked = 0; scheduleState(); }
   });
@@ -852,7 +1033,9 @@ function destroyTab(id) {
   order = order.filter((x) => x !== id);
   win.contentView.removeChildView(t.view);
   if (!t.private) { try { extensions?.removeTab(t.view.webContents); } catch { /* not tracked */ } }
+  stopTranslateWatch(t);
   if (t.private) setImmediate(wipePrivateIfUnused);
+  else if (t.site) setImmediate(() => forgetSiteIfClosed(t.site));
   if (!t.view.webContents.isDestroyed()) t.view.webContents.close();
 }
 
@@ -874,7 +1057,7 @@ function closeTabs(ids) {
   const idx = order.indexOf(activeId);
   for (const id of ids) destroyTab(id);
   cleanupGroups();
-  if (order.length === 0) { createTab(null); return; }
+  if (order.length === 0) { saveTabsNow(); win?.close(); return; } // last tab closed: close the browser
   if (wasActive) {
     const vis = visibleTabs();
     const pick = vis.length ? vis[Math.min(idx, vis.length - 1)] : order[Math.min(idx, order.length - 1)];
@@ -938,9 +1121,10 @@ async function clearBrowsingData() {
     ses.clearStorageData(), ses.clearCache(), ses.clearAuthCache(),
     ses.clearHostResolverCache(), ses.clearCodeCaches({}),
   ]);
+  clearHistory('all');
   createTab(null);
   saveTabsSoon();
-  toast('Browsing data cleared: cookies, cache, storage and tabs.');
+  toast('Browsing data cleared: history, cookies, cache, storage and tabs.');
 }
 
 // ----------------------------------------------------------------- tab groups
@@ -1090,6 +1274,19 @@ function tabMenu(id) {
     { label: 'Reload', click: () => wc.reload() },
     { label: 'Duplicate', click: () => { const u = wc.getURL(); activateTab(id); createTab(u, { groupId: t.groupId, private: t.private }); } },
     { label: wc.isAudioMuted() ? 'Unmute site' : 'Mute site', click: () => { wc.setAudioMuted(!wc.isAudioMuted()); scheduleState(); } },
+  );
+  const site = /^https?:/.test(displayUrl(wc)) ? siteOf(displayUrl(wc)) : null;
+  if (site && !t.private) {
+    const on = settings.privacy.forgetSites.includes(site);
+    items.push({
+      label: `Forget ${site} when closed`, type: 'checkbox', checked: on,
+      click: () => {
+        applySettings({ privacy: { forgetSites: on ? settings.privacy.forgetSites.filter((x) => x !== site) : [...settings.privacy.forgetSites, site] } });
+        toast(on ? `${site} will be remembered` : `${site}'s cookies and data will be deleted when you close it`);
+      },
+    });
+  }
+  items.push(
     { type: 'separator' },
     { label: 'Close tab', click: () => closeTab(id) },
     { label: 'Close other tabs', enabled: order.length > 1, click: () => closeTabs(order.filter((x) => x !== id)) },
@@ -1105,7 +1302,7 @@ function saveTabsSoon() {
   tabsTimer = setTimeout(saveTabsNow, 500);
 }
 function saveTabsNow() {
-  if (!settings) return;
+  if (!settings || EPHEMERAL) return;
   const data = {
     groups: [...groups.values()],
     tabs: order.filter((id) => !tabs.get(id).private).map((id) => {
@@ -1117,7 +1314,7 @@ function saveTabsNow() {
   try { fs.writeFileSync(sessionFile(), JSON.stringify(data)); } catch { /* ignore */ }
 }
 function restoreTabs() {
-  if (!settings.restoreTabs) return false;
+  if (!settings.restoreTabs || EPHEMERAL) return false;
   let data;
   try { data = JSON.parse(fs.readFileSync(sessionFile(), 'utf8')); } catch { return false; }
   if (!data.tabs || !data.tabs.length) return false;
@@ -1149,6 +1346,8 @@ function handleShortcut(event, input) {
   let handled = true;
   if (mod && !input.shift && k === 't') createTab(null, { position: 'end' });
   else if (mod && input.shift && k === 'n') createTab(null, { position: 'end', private: true });
+  else if (mod && input.shift && k === 'p') openWindow('private');
+  else if (input.alt && input.shift && k === 'n') openWindow('tor');
   else if (mod && k === 'w') closeTab(activeId);
   else if ((mod && k === 'l') || (input.alt && k === 'd') || k === 'f6') {
     ui.webContents.focus(); ui.webContents.send('focus-address');
@@ -1163,6 +1362,8 @@ function handleShortcut(event, input) {
   else if (mod && k === '0') zoom(0);
   else if (mod && k === 'f') { ui.webContents.focus(); ui.webContents.send('find-open'); }
   else if (mod && k === ',') openInternal(SETTINGS_URL);
+  else if (mod && !input.shift && k === 'h') openInternal(HISTORY_URL);
+  else if (mod && !input.shift && !input.alt && k === 'p') activeWc()?.print({});
   else if (mod && !input.shift && k === 'd') toggleBookmarkForActive();
   else if (mod && input.shift && k === 'b') setBookmarksBar(!settings.showBookmarksBar);
   else if (mod && input.shift && (k === 'delete' || k === 'backspace')) openInternal(SETTINGS_URL + '#data');
@@ -1201,6 +1402,13 @@ function showContextMenu(wc, p) {
     const short = s.length > 24 ? s.slice(0, 24) + '…' : s;
     items.push({ role: 'copy' }, { label: `Search for “${short}”`, click: () => createTab(searchUrl(s), { groupId }) }, sep);
   }
+  const ctab = tabByWebContentsId(wc.id);
+  if (ctab && /^https?:/.test(wc.getURL())) {
+    const done = ctab.tr && (ctab.tr.state === 'done' || ctab.tr.state === 'working');
+    items.push(done
+      ? { label: 'Show original', click: () => showOriginal(ctab) }
+      : { label: `Translate page to ${LANGUAGES[settings.languages.translateTo]}`, click: () => translateTab(ctab) }, sep);
+  }
   items.push(
     ...extensionMenuItems(wc, p),
     { label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() },
@@ -1225,6 +1433,9 @@ function pushState() {
   ui.webContents.send('state', {
     activeId,
     shield: shieldState,
+    tor: settings.tor.enabled ? tor.state : 'off',
+    torButton: settings.tor.showButton || settings.tor.enabled || MODE === 'tor',
+    windowMode: MODE,
     bookmarksBar: !!settings.showBookmarksBar,
     pinnedExtensions: settings.extensions.pinned || [],
     bookmarks: bookmarks.items,
@@ -1249,6 +1460,7 @@ function pushState() {
         muted: wc.isAudioMuted(),
         audible: wc.isCurrentlyAudible(),
         security: securityOf(url),
+        translate: t.tr ? { state: t.tr.state, from: t.tr.from || '', fromName: LANGUAGES[t.tr.from] || LANGUAGES[(t.tr.from || '').split('-')[0]] || t.tr.from || '', to: LANGUAGES[settings.languages.translateTo], error: t.tr.error || '' } : null,
       };
     }),
   });
@@ -1356,6 +1568,150 @@ function fpSeed(url) {
   return require('crypto').createHmac('sha256', fpSecret).update(site).digest().readUInt32LE(0);
 }
 
+// ---------------------------------------------------------------- translation
+const translator = new Translator(() => settings.languages);
+// tab.tr = { state: 'offer' | 'working' | 'done' | 'error', from, error }
+async function checkTranslate(tab) {
+  const wc = tab.view.webContents;
+  if (wc.isDestroyed() || !/^https?:/.test(wc.getURL()) || wc.isLoading()) return;
+  if (tab.tr && tab.tr.state !== 'offer') return;
+  const lang = await translator.pageLang(wc);
+  const to = settings.languages.translateTo;
+  if (!lang || sameLang(lang, to) || !settings.languages.offer) { if (tab.tr) { tab.tr = null; scheduleState(); } return; }
+  tab.tr = { state: 'offer', from: lang };
+  if (settings.languages.auto) translateTab(tab);
+  else scheduleState();
+}
+async function translateTab(tab) {
+  const wc = tab.view.webContents;
+  if (wc.isDestroyed()) return;
+  const url = wc.getURL();
+  tab.tr = { ...(tab.tr || {}), state: 'working', error: '' };
+  scheduleState();
+  try {
+    const r = await translator.translatePage(wc, settings.languages.translateTo);
+    if (wc.isDestroyed() || wc.getURL() !== url) return;
+    tab.tr = { state: 'done', from: (tab.tr && tab.tr.from) || r.src };
+    if (r.src && !tab.tr.from) tab.tr.from = r.src;
+    // Keep translating text the page adds later (infinite scroll, menus, chat).
+    stopTranslateWatch(tab);
+    tab.trTimer = setInterval(async () => {
+      if (wc.isDestroyed() || !tab.tr || tab.tr.state !== 'done' || tab.trBusy) return;
+      if (tab.id !== activeId) return;
+      tab.trBusy = true;
+      try { await translator.translatePage(wc, settings.languages.translateTo); } catch { /* try next time */ }
+      tab.trBusy = false;
+    }, 2500);
+  } catch (err) {
+    if (wc.isDestroyed()) return;
+    tab.tr = { ...(tab.tr || {}), state: 'error', error: String(err.message || err) };
+    toast(`Couldn't translate: ${tab.tr.error}`);
+  }
+  scheduleState();
+}
+function stopTranslateWatch(tab) { if (tab.trTimer) { clearInterval(tab.trTimer); tab.trTimer = null; } }
+async function showOriginal(tab) {
+  stopTranslateWatch(tab);
+  await translator.restore(tab.view.webContents);
+  tab.tr = tab.tr ? { state: 'offer', from: tab.tr.from } : null;
+  scheduleState();
+}
+function translateMenu(id) {
+  const t = tabs.get(id) || tabs.get(activeId);
+  if (!t) return;
+  const L = settings.languages;
+  const done = t.tr && (t.tr.state === 'done' || t.tr.state === 'working');
+  const langItems = Object.entries(LANGUAGES).map(([code, name]) => ({
+    label: name, type: 'radio', checked: code === L.translateTo,
+    click: async () => { if (done) await showOriginal(t); await applySettings({ languages: { translateTo: code } }); translateTab(t); },
+  }));
+  Menu.buildFromTemplate([
+    done ? { label: 'Show original', click: () => showOriginal(t) } : { label: `Translate to ${LANGUAGES[L.translateTo]}`, click: () => translateTab(t) },
+    { label: 'Translate to', submenu: langItems },
+    { type: 'separator' },
+    { label: 'Always translate other languages', type: 'checkbox', checked: L.auto, click: () => applySettings({ languages: { auto: !L.auto } }) },
+    { label: 'Language settings…', click: () => openInternal(SETTINGS_URL + '#languages') },
+  ]).popup({ window: win });
+}
+
+// -------------------------------------------------------------------- history
+// Visits from normal tabs (never private ones), newest last, in history.json.
+let history = [];
+let historySeq = 0;
+let historyTimer = null;
+const historyFile = () => path.join(userDir(), 'history.json');
+const HISTORY_MAX = 50000;
+
+function loadHistory() {
+  try {
+    const data = JSON.parse(fs.readFileSync(historyFile(), 'utf8'));
+    if (Array.isArray(data)) history = data.filter((h) => h && typeof h.url === 'string' && Number.isFinite(h.t));
+  } catch { /* none yet */ }
+  historySeq = history.reduce((m, h) => Math.max(m, h.id || 0), 0);
+  pruneHistory(false);
+}
+function saveHistorySoon() {
+  clearTimeout(historyTimer);
+  historyTimer = setTimeout(saveHistoryNow, 1500);
+}
+function saveHistoryNow() {
+  clearTimeout(historyTimer);
+  if (EPHEMERAL) return;
+  try {
+    if (!history.length) fs.rmSync(historyFile(), { force: true });
+    else fs.writeFileSync(historyFile(), JSON.stringify(history));
+  } catch { /* ignore */ }
+}
+function pruneHistory(save) {
+  const days = settings ? settings.history.keepDays : 90;
+  const before = history.length;
+  if (days === 0) history = [];
+  else if (days > 0) { const cutoff = Date.now() - days * 86400000; history = history.filter((h) => h.t >= cutoff); }
+  if (history.length > HISTORY_MAX) history = history.slice(history.length - HISTORY_MAX);
+  if (save || history.length !== before) saveHistorySoon();
+}
+setInterval(() => pruneHistory(false), 6 * 3600000).unref();
+
+function recordVisit(tab, url, inPage = false) {
+  if (tab.private || !settings || settings.history.keepDays === 0) return;
+  if (!/^https?:\/\//.test(url)) return;
+  const now = Date.now();
+  const last = history[history.length - 1];
+  // Same page again within a minute (reloads, in-page hash changes): just refresh the time.
+  if (last && last.url === url && now - last.t < 60000) { last.t = now; tab.histId = last.id; saveHistorySoon(); return; }
+  const entry = { id: ++historySeq, url, title: inPage ? (tab.title || '') : '', t: now };
+  history.push(entry);
+  tab.histId = entry.id;
+  if (history.length > HISTORY_MAX + 500) pruneHistory(false);
+  saveHistorySoon();
+}
+function updateHistoryTitle(tab, title) {
+  if (!tab.histId || tab.private) return;
+  for (let i = history.length - 1; i >= Math.max(0, history.length - 200); i--) {
+    if (history[i].id === tab.histId) { history[i].title = String(title || '').slice(0, 300); saveHistorySoon(); return; }
+  }
+}
+function clearHistory(range) {
+  const spans = { hour: 3600000, day: 86400000, week: 7 * 86400000, month: 30 * 86400000 };
+  if (range === 'all' || !spans[range]) history = [];
+  else { const cutoff = Date.now() - spans[range]; history = history.filter((h) => h.t < cutoff); }
+  saveHistoryNow();
+}
+function queryHistory({ q = '', before = Infinity, limit = 200 } = {}) {
+  const words = String(q).toLowerCase().split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = history.length - 1; i >= 0 && out.length < Math.min(1000, limit); i--) {
+    const h = history[i];
+    if (h.t >= before) continue;
+    if (words.length) {
+      const hay = (h.title + ' ' + h.url).toLowerCase();
+      if (!words.every((w) => hay.includes(w))) continue;
+    }
+    out.push(h);
+  }
+  return { items: out, total: history.length, more: out.length >= limit };
+}
+
 // ------------------------------------------------------------------ bookmarks
 // { items: [ { id, type: 'link', title, url } | { id, type: 'folder', title, children: [links] } ] }
 let bookmarks = { items: [] };
@@ -1376,6 +1732,7 @@ function validBookmark(b) {
 function saveBookmarks() {
   clearTimeout(bmTimer);
   bmTimer = setTimeout(() => {
+    if (EPHEMERAL) return;
     try { fs.writeFileSync(bookmarksFile(), JSON.stringify(bookmarks, null, 2)); } catch { /* ignore */ }
   }, 200);
   scheduleState();
@@ -1551,6 +1908,115 @@ function wireBookmarksIpc() {
   }));
 }
 
+// ------------------------------------------------------------ main menu (cog)
+const APPMENU_W = 340;
+let appMenu = null;
+let appMenuOpen = false;
+let appMenuHiddenAt = 0;
+let appMenuHeight = 460;
+let appMenuAnchor = null;
+
+function ensureAppMenu() {
+  if (appMenu && !appMenu.webContents.isDestroyed()) return appMenu;
+  appMenu = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'panel', 'menu-preload.js'),
+      contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false,
+    },
+  });
+  appMenu.setBackgroundColor('#00000000');
+  appMenu.setVisible(false);
+  const wc = appMenu.webContents;
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('will-navigate', (e) => e.preventDefault());
+  wc.on('blur', () => hideAppMenu());
+  wc.on('before-input-event', (e, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); hideAppMenu(); activeWc()?.focus(); }
+  });
+  wc.on('did-finish-load', () => { wc.send('appearance', appearance()); pushAppMenu(); });
+  wc.loadFile(path.join(__dirname, 'panel', 'menu.html'));
+  win.contentView.addChildView(appMenu);
+  return appMenu;
+}
+function placeAppMenu() {
+  if (!appMenu || !win || !appMenuAnchor) return;
+  const { width, height } = win.getContentBounds();
+  const right = appMenuAnchor.x + appMenuAnchor.width;
+  const x = Math.max(8, Math.min(width - APPMENU_W - 4, Math.round(right - APPMENU_W + 12)));
+  const y = uiHeight() - 8;
+  appMenu.setBounds({ x, y, width: APPMENU_W, height: Math.min(appMenuHeight, Math.max(160, height - y - 4)) });
+}
+function toggleAppMenu(rect) {
+  if (appMenuOpen) { hideAppMenu(); return; }
+  if (Date.now() - appMenuHiddenAt < 300) return;
+  hidePanel();
+  hideExtMenu();
+  appMenuAnchor = rect && Number.isFinite(rect.x) ? rect : { x: 0, y: 0, width: 0, height: 0 };
+  const v = ensureAppMenu();
+  win.contentView.addChildView(v);
+  placeAppMenu();
+  v.setVisible(true);
+  appMenuOpen = true;
+  pushAppMenu();
+  v.webContents.focus();
+  v.webContents.send('panel-open');
+}
+function hideAppMenu() {
+  if (!appMenu || !appMenuOpen) return;
+  appMenuOpen = false;
+  appMenuHiddenAt = Date.now();
+  appMenu.setVisible(false);
+}
+function pushAppMenu() {
+  if (!appMenu || appMenu.webContents.isDestroyed()) return;
+  const wc = activeWc();
+  const url = wc ? displayUrl(wc) : '';
+  const level = wc ? wc.getZoomLevel() : 0;
+  appMenu.webContents.send('menu-state', {
+    zoom: Math.round(Math.pow(1.2, level) * 100),
+    bookmarksBar: !!settings.showBookmarksBar,
+    isWeb: /^https?:/.test(url),
+    fullscreen,
+    version: require(path.join(__dirname, "..", "package.json")).version,
+  });
+}
+function wireAppMenuIpc() {
+  const fromMenu = (fn) => (event, ...args) => { if (appMenu && event.sender === appMenu.webContents) return fn(...args); return undefined; };
+  ipcMain.on('app-menu', fromUi((rect) => toggleAppMenu(rect)));
+  ipcMain.on('appmenu:size', fromMenu((h) => { appMenuHeight = Math.max(160, Math.min(720, Math.ceil(Number(h) || 460))); placeAppMenu(); }));
+  ipcMain.on('appmenu:close', fromMenu(() => { hideAppMenu(); activeWc()?.focus(); }));
+  ipcMain.on('appmenu:do', fromMenu((action) => {
+    const keepOpen = ['zoomin', 'zoomout', 'zoomreset'].includes(action);
+    if (!keepOpen) hideAppMenu();
+    const wc = activeWc();
+    switch (action) {
+      case 'newtab': createTab(null, { position: 'end' }); break;
+      case 'private': createTab(null, { position: 'end', private: true }); break;
+      case 'privatewindow': openWindow('private'); break;
+      case 'torwindow': openWindow('tor'); break;
+      case 'history': openInternal(HISTORY_URL); break;
+      case 'bookmarksbar': setBookmarksBar(!settings.showBookmarksBar); break;
+      case 'bookmark': toggleBookmarkForActive(); break;
+      case 'find': ui.webContents.focus(); ui.webContents.send('find-open'); break;
+      case 'print': wc?.print({}); break;
+      case 'zoomin': zoom(0.5); break;
+      case 'zoomout': zoom(-0.5); break;
+      case 'zoomreset': zoom(0); break;
+      case 'fullscreen': setFullscreen(!fullscreen); break;
+      case 'downloads': shell.openPath(app.getPath('downloads')); break;
+      case 'extensions': openInternal(SETTINGS_URL + '#extensions'); break;
+      case 'cleardata': openInternal(SETTINGS_URL + '#data'); break;
+      case 'adblock': openInternal(SETTINGS_URL + '#adblock'); break;
+      case 'settings': openInternal(SETTINGS_URL); break;
+      case 'about': openInternal(SETTINGS_URL + '#about'); break;
+      case 'devtools': wc?.toggleDevTools(); break;
+      case 'quit': win?.close(); break;
+      default: break;
+    }
+    if (keepOpen) setTimeout(pushAppMenu, 30);
+  }));
+}
+
 // ---------------------------------------------------------- extensions menu
 const EXTMENU_W = 320;
 let extMenu = null;
@@ -1592,6 +2058,7 @@ function toggleExtMenu(rect) {
   if (extMenuOpen) { hideExtMenu(); return; }
   if (Date.now() - extMenuHiddenAt < 300) return;
   hidePanel();
+  hideAppMenu();
   extMenuAnchor = rect && Number.isFinite(rect.x) ? rect : { x: 0, y: 0, width: 0, height: 0 };
   const v = ensureExtMenu();
   win.contentView.addChildView(v);
@@ -1836,13 +2303,35 @@ function wireUiIpc() {
   ipcMain.on('reload', fromUi(() => reload(false)));
   ipcMain.on('stop', fromUi(() => activeWc()?.stop()));
   ipcMain.on('settings', fromUi(() => openInternal(SETTINGS_URL)));
-  ipcMain.on('shield', fromUi((right) => { hideExtMenu(); togglePanel(right); }));
+  ipcMain.on('tor-settings', fromUi(() => openInternal(SETTINGS_URL + '#tor')));
+  ipcMain.on('tor-toggle', fromUi(() => {
+    if (MODE === 'tor') { toast('This is a Tor window: it always uses Tor.'); return; }
+    const on = !settings.tor.enabled;
+    applySettings({ tor: { enabled: on } });
+    toast(on ? 'Tor on: connecting…' : 'Tor off: connecting directly');
+  }));
+  ipcMain.on('tor-menu', fromUi(() => {
+    Menu.buildFromTemplate([
+      { label: settings.tor.enabled ? 'Turn Tor off' : 'Turn Tor on', enabled: MODE !== 'tor', click: () => applySettings({ tor: { enabled: !settings.tor.enabled } }) },
+      { label: 'New circuit', enabled: tor.state === 'on', click: async () => { if (await tor.newCircuit().catch(() => false)) { await Promise.allSettled(allSessions().map((x) => x.closeAllConnections())); toast('New Tor circuit'); } } },
+      { type: 'separator' },
+      { label: 'Show this button', type: 'checkbox', checked: settings.tor.showButton, click: () => applySettings({ tor: { showButton: !settings.tor.showButton } }) },
+      { label: 'Tor settings…', click: () => openInternal(SETTINGS_URL + '#tor') },
+    ]).popup({ window: win });
+  }));
+  ipcMain.on('translate', fromUi(() => {
+    const t = tabs.get(activeId);
+    if (!t) return;
+    if (t.tr && (t.tr.state === 'done' || t.tr.state === 'working')) showOriginal(t); else translateTab(t);
+  }));
+  ipcMain.on('translate-menu', fromUi(() => translateMenu(activeId)));
+  ipcMain.on('shield', fromUi((right) => { hideExtMenu(); hideAppMenu(); togglePanel(right); }));
   ipcMain.on('focus-page', fromUi(() => activeWc()?.focus()));
   // Warm up a connection before the user hits Enter or clicks.
   ipcMain.on('preconnect', fromUi((url) => {
     try {
       const target = url ? new URL(url) : new URL(SEARCH_ENGINES[settings.searchEngine]);
-      if (/^https?:$/.test(target.protocol)) ses.preconnect({ url: target.origin, numSockets: 1 });
+      if (/^https?:$/.test(target.protocol) && !settings.privacy.blockPrefetch) ses.preconnect({ url: target.origin, numSockets: 1 });
     } catch { /* ignore */ }
   }));
   ipcMain.on('tab-menu', fromUi((id) => tabMenu(id)));
@@ -1883,9 +2372,10 @@ function wirePagesIpc() {
   ipcMain.on('goat:fp-config', (event) => {
     const url = event.senderFrame && event.senderFrame.url;
     if (!settings || !url || !/^https?:/.test(url)) { event.returnValue = { level: 'off', webauthn: 'allow' }; return; }
+    const langs = acceptLanguage(settings.languages.sites).split(',').map((x) => x.split(';')[0]);
     let top = url;
     try { top = event.sender.getURL() || url; } catch { /* ignore */ }
-    event.returnValue = { level: settings.privacy.fingerprint, webauthn: settings.privacy.webauthn, seed: fpSeed(top || url), chrome: CHROME_MAJOR };
+    event.returnValue = { level: settings.privacy.fingerprint, webauthn: settings.privacy.webauthn, seed: fpSeed(top || url), chrome: CHROME_MAJOR, langs };
   });
   // A site wants a passkey / security key: ask before Windows shows its dialog.
   const webauthnAllowed = new Map(); // origin -> true (this run only)
@@ -1915,6 +2405,20 @@ function wirePagesIpc() {
     const url = event.senderFrame && event.senderFrame.url;
     event.returnValue = url && url.startsWith(`${SCHEME}://`) && settings ? appearance() : null;
   });
+  ipcMain.handle('goat:history-query', fromPage('history', (opts) => queryHistory(opts || {})));
+  ipcMain.handle('goat:history-delete', fromPage('history', (ids) => {
+    const set = new Set((ids || []).map(Number));
+    history = history.filter((h) => !set.has(h.id));
+    saveHistorySoon();
+    return true;
+  }));
+  ipcMain.handle('goat:history-clear', fromPage('history', (range) => { clearHistory(String(range)); return true; }));
+  ipcMain.handle('goat:history-open', fromPage('history', (url, how) => {
+    if (!/^https?:\/\//.test(String(url))) return;
+    if (how === 'background') createTab(String(url), { activate: false, position: 'end' });
+    else activeWc()?.loadURL(String(url));
+  }));
+  ipcMain.handle('goat:history-settings', fromPage('history', () => { openInternal(SETTINGS_URL + '#privacy'); }));
   ipcMain.handle('goat:newtab-bookmarks', fromPage('newtab', () => bookmarks.items));
   ipcMain.handle('goat:newtab-add', fromPage('newtab', (rawUrl, rawTitle) => {
     const text = String(rawUrl || '').trim();
@@ -1940,12 +2444,15 @@ function wirePagesIpc() {
     if (u && t) t.loadURL(u);
   }));
   ipcMain.handle('goat:settings-get', fromPage('settings', () => ({
+    windowMode: MODE,
+    languages: LANGUAGES,
+    profiles: PROFILES,
     settings: publicSettings(),
     blocker: blockerStatus(),
     engines: Object.keys(SEARCH_ENGINES),
     themes: Object.entries(THEMES).map(([id, t]) => ({ id, name: t.name, scheme: t.scheme })),
     customVars: Object.fromEntries(settings.appearance.customThemes.map((t) => [t.id, customVars(t.colors)])),
-    version: app.getVersion(),
+    version: require(path.join(__dirname, "..", "package.json")).version,
     chrome: process.versions.chrome,
   })));
   ipcMain.handle('goat:settings-set', fromPage('settings', (patch) => applySettings(patch)));
@@ -1987,6 +2494,13 @@ function wirePagesIpc() {
     return true;
   }));
   ipcMain.handle('goat:tasks', fromPage('settings', () => taskList()));
+  ipcMain.handle('goat:tor-status', fromPage('settings', () => ({ ...tor.status(), enabled: settings.tor.enabled })));
+  ipcMain.handle('goat:tor-newcircuit', fromPage('settings', async () => {
+    const ok = await tor.newCircuit().catch(() => false);
+    if (ok) await Promise.allSettled(allSessions().map((s) => s.closeAllConnections()));
+    return ok;
+  }));
+  ipcMain.handle('goat:tor-check', fromPage('settings', () => { createTab('https://check.torproject.org/'); }));
   ipcMain.handle('goat:dns-status', fromPage('settings', () => dnsStatus()));
   ipcMain.handle('goat:dns-check', fromPage('settings', (url) => { if (/^https:\/\//.test(String(url))) createTab(String(url)); }));
   ipcMain.handle('goat:task-sleep', fromPage('settings', (id) => {
@@ -2206,7 +2720,7 @@ function layout() {
 function createWindow() {
   win = new BaseWindow({
     width: 1280, height: 840, minWidth: 520, minHeight: 320,
-    title: 'Goat Browser', backgroundColor: appearance().bg, icon: path.join(__dirname, 'icon.png'),
+    title: { normal: 'Goat Browser', private: 'Goat Browser · Private window', tor: 'Goat Browser · Tor window' }[MODE], backgroundColor: appearance().bg, icon: path.join(__dirname, 'icon.png'),
     // Hide the OS title bar; min/max/close are drawn over the right end of the tab strip.
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#00000000', symbolColor: appearance().text, height: CONTROLS_HEIGHT },
@@ -2224,8 +2738,8 @@ function createWindow() {
   ui.webContents.on('will-navigate', (e) => e.preventDefault());
   ui.webContents.loadFile(path.join(__dirname, 'ui', 'index.html'));
   ui.webContents.on('did-finish-load', () => { applyAppearance(); pushState(); });
-  win.on('resize', () => { hidePanel(); hideExtMenu(); layout(); });
-  win.on('blur', () => { hidePanel(); hideExtMenu(); });
+  win.on('resize', () => { hidePanel(); hideExtMenu(); hideAppMenu(); layout(); });
+  win.on('blur', () => { hidePanel(); hideExtMenu(); hideAppMenu(); });
   win.on('leave-full-screen', () => { if (fullscreen) { fullscreen = false; layout(); } });
   win.on('close', () => { saveTabsNow(); });
   win.on('closed', () => { win = null; app.quit(); });
@@ -2247,7 +2761,34 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
     loadSettings();
+    tor = new Tor({
+      dir: path.join(userDir(), 'tor'),
+      stateDir: EPHEMERAL ? path.join(app.getPath('userData'), 'tor-state') : path.join(userDir(), 'tor', 'state'),
+      onChange: (st) => {
+        if (st.state === 'starting') applyProxy();
+        if (st.state === 'on') {
+          // The port may have changed: point the sessions at it, then reload tabs that failed while connecting.
+          applyProxy().then(() => {
+            for (const t of tabs.values()) {
+              const wc = t.view.webContents;
+              if (!wc.isDestroyed() && wc.getURL().startsWith(`${SCHEME}://error/`)) {
+                try { wc.loadURL(new URL(wc.getURL()).searchParams.get('u')); } catch { /* ignore */ }
+              }
+            }
+          });
+          toast('Tor connected');
+        } else if (st.state === 'error') toast('Tor: ' + st.error);
+        scheduleState();
+        for (const wc of allWebContents.getAllWebContents()) {
+          if (!wc.isDestroyed() && wc.getURL().startsWith(SETTINGS_URL)) wc.send('goat:tor', st);
+        }
+      },
+    });
+    if (MODE === 'tor') settings.tor.enabled = true;
+    if (settings.tor.enabled) tor.start();
+    cleanStaleWindowProfiles();
     loadBookmarks();
+    loadHistory();
     settings.appearance.customThemes = sanitizeCustomThemes(settings.appearance.customThemes);
     { const info = themeInfo(settings.appearance.theme); nativeTheme.themeSource = info && settings.appearance.theme !== 'system' ? info.scheme : 'system'; }
     applyDns();
@@ -2258,9 +2799,10 @@ if (!app.requestSingleInstanceLock()) {
     wireExtensionsIpc();
     wirePanelIpc();
     wireExtMenuIpc();
+    wireAppMenuIpc();
     wireBookmarksIpc();
     createWindow();
-    await setupExtensions();
+    if (!EPHEMERAL) await setupExtensions(); // extensions never run in private/Tor windows
 
     // Load blocklists before the first page so it loads protected.
     blockerPromise = reloadBlocker();
@@ -2286,7 +2828,12 @@ app.on('before-quit', (e) => {
 // spins after will-quit). Cookies, storage, settings and tabs are already saved
 // by this point, so end the process directly.
 app.on('will-quit', () => {
+  if (tor) tor.kill();
+  if (!EPHEMERAL) {
   try { if (settings) fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2)); } catch { /* ignore */ }
+  if (historyTimer) saveHistoryNow();
+  }
+  if (bmTimer && !EPHEMERAL) { try { fs.writeFileSync(bookmarksFile(), JSON.stringify(bookmarks, null, 2)); } catch { /* ignore */ } }
   if (typeof process.reallyExit === 'function') process.reallyExit(0);
   else process.kill(process.pid, 'SIGKILL');
 });
@@ -2297,6 +2844,7 @@ if (process.env.GOAT_TEST) {
     createTab, newGroupWith, setGroupCollapsed, addToGroup, removeFromGroup, applySettings, mergeTabs, moveGroup,
     togglePanel, hidePanel, panel: () => panel, addBookmark, bookmarks: () => bookmarks, toggleBookmarkForActive,
     sleepTab, discardTab, activateTab, pendingUrls, listExtensions, shield: () => shieldState, closeTabById: (id) => closeTab(id),
+    history: () => history, toggleAppMenu, translateTab, showOriginal, ui: () => ui, skipForExtension,
     groups, tabs, order: () => order, activeId: () => activeId, session: () => ses, pushState,
   };
 }

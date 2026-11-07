@@ -43,8 +43,97 @@ function fillFields() {
   }
   $('rules').value = S.adblock.customRules;
   renderAllowlist();
+  renderForget();
+  renderProfiles();
   syncProxyFields();
+  $('librefields').hidden = S.languages.engine !== 'libre';
+  markRestart();
 }
+
+// ----------------------------------------------------------------- profiles
+let PROFILES = {};
+function profileMatches(patch, cur) {
+  return Object.entries(patch).every(([k, v]) => (v && typeof v === 'object' ? profileMatches(v, (cur || {})[k]) : (cur || {})[k] === v));
+}
+function currentProfile() {
+  for (const [id, p] of Object.entries(PROFILES)) if (profileMatches(p.patch, S)) return id;
+  return 'custom';
+}
+function renderProfiles() {
+  const box = $('profiles');
+  if (!box || !S) return;
+  const cur = currentProfile();
+  box.textContent = '';
+  for (const [id, p] of Object.entries(PROFILES)) {
+    box.append(el('button', {
+      type: 'button', class: 'profile' + (cur === id ? ' on' : ''), role: 'radio', 'aria-checked': String(cur === id),
+      onclick: async () => {
+        S = await api.setSettings(p.patch);
+        fillFields();
+        pollBlocker();
+        setTimeout(refreshDns, 300);
+        $('profrestart').hidden = !document.querySelector('[data-restart^="privacy."]:not([hidden])');
+      },
+    }, el('b', {}, p.name), el('small', {}, p.desc)));
+  }
+  if (cur === 'custom') box.append(el('p', { class: 'hint custom' }, 'Custom: your own mix of the switches below.'));
+}
+
+// Settings read at startup: show "restart" when changed this session.
+const START = {};
+function markRestart() {
+  for (const em of document.querySelectorAll('[data-restart]')) {
+    const k = em.dataset.restart;
+    if (!(k in START)) START[k] = get(S, k);
+    em.hidden = get(S, k) === START[k];
+  }
+}
+
+function renderForget() {
+  const ul = $('forgetlist');
+  ul.textContent = '';
+  const list = S.privacy.forgetSites || [];
+  if (!list.length) ul.append(el('li', { class: 'empty' }, 'No sites yet.'));
+  for (const site of list) {
+    ul.append(el('li', {}, site, el('button', {
+      class: 'x', title: `Remove ${site}`, 'aria-label': `Remove ${site}`,
+      onclick: async () => { S = await api.setSettings({ privacy: { forgetSites: S.privacy.forgetSites.filter((x) => x !== site) } }); renderForget(); },
+    }, '×')));
+  }
+}
+$('forgetform').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const v = $('forgetinput').value.trim();
+  if (!v) return;
+  S = await api.setSettings({ privacy: { forgetSites: [...(S.privacy.forgetSites || []), v] } });
+  $('forgetinput').value = '';
+  renderForget();
+});
+
+// ---------------------------------------------------------------------- tor
+function renderTor(st) {
+  const on = st.enabled !== false && S && S.tor.enabled;
+  const txt = !on ? 'Off'
+    : st.state === 'downloading' ? `Downloading Tor… ${st.progress || 0}%`
+    : st.state === 'starting' ? `Connecting to the Tor network… ${st.progress || 0}%`
+    : st.state === 'on' ? `Connected${st.version ? ` · Tor ${st.version}` : ''}`
+    : st.state === 'error' ? `Not working: ${st.error}`
+    : 'Starting…';
+  const box = $('torstate');
+  box.textContent = txt;
+  box.className = on && st.state === 'error' ? 'bad' : on && st.state === 'on' ? 'good' : 'muted';
+  $('tornew').disabled = !(on && st.state === 'on');
+  $('torcheck').disabled = !(on && st.state === 'on');
+}
+async function refreshTor() { renderTor(await api.tor.status()); }
+if (api) api.tor.onStatus((st) => renderTor(st));
+$('tornew').addEventListener('click', async () => {
+  $('tornew').disabled = true;
+  const ok = await api.tor.newCircuit();
+  $('torstate').textContent = ok ? 'New circuit ready · reload a page to use it' : "Couldn't change circuit";
+  setTimeout(refreshTor, 4000);
+});
+$('torcheck').addEventListener('click', () => api.tor.check());
 
 document.querySelectorAll('[data-key]').forEach((input) => {
   input.addEventListener('change', async () => {
@@ -52,6 +141,10 @@ document.querySelectorAll('[data-key]').forEach((input) => {
     if (input.type === 'radio' && !input.checked) return;
     S = await api.setSettings(patchFor(input.dataset.key, v));
     if (input.dataset.key.startsWith('adblock')) pollBlocker();
+    if (input.dataset.key.startsWith('tor')) refreshTor();
+    if (input.dataset.key === 'languages.engine') $('librefields').hidden = S.languages.engine !== 'libre';
+    markRestart();
+    renderProfiles();
   });
 });
 
@@ -338,7 +431,6 @@ window.addEventListener('hashchange', () => { const t = document.querySelector(l
 // ------------------------------------------------------------------ themes
 // Base colors of the built-in themes, used to prefill the editor.
 const BUILTIN = {
-  goat: { bg: '#101214', surface: '#181b1f', text: '#e7e9ec', accent: '#ff0064', accent2: '#ff6ad5' },
   midnight: { bg: '#101214', surface: '#181b1f', text: '#e7e9ec', accent: '#5fd3b3', accent2: '#6ea8ff' },
   daylight: { bg: '#eef0f3', surface: '#ffffff', text: '#16191d', accent: '#0d8a6c', accent2: '#4a6cf7' },
   forest: { bg: '#0f1511', surface: '#161e18', text: '#e4ece5', accent: '#8bd17c', accent2: '#d8c35b' },
@@ -435,7 +527,7 @@ function openEditor(id) {
   }
   const cur = S.appearance.theme;
   const curCustom = S.appearance.customThemes.find((t) => t.id === cur);
-  fillEditor(existing ? existing.colors : curCustom ? curCustom.colors : BUILTIN[cur] || BUILTIN.goat);
+  fillEditor(existing ? existing.colors : curCustom ? curCustom.colors : BUILTIN[cur] || BUILTIN.midnight);
   $('editor').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   $('ed-name').focus();
 }
@@ -476,6 +568,14 @@ $('ed-delete').addEventListener('click', async () => {
   if (!api) { document.body.textContent = 'Settings are only available inside Goat Browser.'; return; }
   const info = await api.getSettings();
   S = info.settings;
+  PROFILES = info.profiles || {};
+  for (const sel of document.querySelectorAll('.langselect')) {
+    for (const [code, name] of Object.entries(info.languages || {})) sel.append(el('option', { value: code }, name));
+  }
+  if (info.windowMode && info.windowMode !== 'normal') {
+    $('winnote').hidden = false;
+    $('winnote').textContent = `This is a ${info.windowMode === 'tor' ? 'Tor' : 'private'} window. Settings you change here only last until it closes. Change them in a normal window to keep them.`;
+  }
   fillFields();
   renderThemes(info.themes, info.customVars);
   pollBlocker();
@@ -484,6 +584,7 @@ $('ed-delete').addEventListener('click', async () => {
   api.extensions.onChanged(() => api.extensions.list().then(renderExtensions));
   renderTasks();
   refreshDns();
+  refreshTor();
   window.addEventListener('focus', () => api.extensions.list().then(renderExtensions));
   markNav();
   $('about-text').textContent = `Goat Browser ${info.version} · Chromium ${info.chrome}. Data folder: your Goat Browser profile in %APPDATA%.`;

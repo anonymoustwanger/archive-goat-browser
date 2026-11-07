@@ -173,4 +173,22 @@ if (/^https?:$/.test(location.protocol)) {
       }
     } catch (e) { /* page still works without the shield */ }
   }
+  // Website language (Settings → Languages): navigator.language(s) match the Accept-Language header.
+  if (cfg && Array.isArray(cfg.langs) && cfg.langs.length) {
+    const setLangs = (langs) => {
+      const list = Object.freeze(langs.slice());
+      const def = (prop, val) => {
+        const d = Object.getOwnPropertyDescriptor(Navigator.prototype, prop);
+        if (!d || !d.get) return;
+        const g = Object.getOwnPropertyDescriptor({ get [prop]() { return val; } }, prop).get;
+        try { Object.defineProperty(Navigator.prototype, prop, { ...d, get: g }); } catch (e) { /* ignore */ }
+      };
+      def('language', list[0]);
+      def('languages', list);
+    };
+    try {
+      if (contextBridge.executeInMainWorld) contextBridge.executeInMainWorld({ func: setLangs, args: [cfg.langs] });
+      else webFrame.executeJavaScript(`(${setLangs})(${JSON.stringify(cfg.langs)})`);
+    } catch (e) { /* ignore */ }
+  }
 }
