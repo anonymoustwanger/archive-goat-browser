@@ -3,13 +3,18 @@
 // APIs that sites use to build a unique ID for your device.
 //  standard: generic hardware, GPU and client-hint values; no Battery API.
 //  strict:   also adds tiny, per-site noise to canvas and audio readouts.
+// Passkeys / security keys (WebAuthn), separately configurable:
+//  ask:   sites must get your OK before Windows shows its security-key dialog, and
+//         background "autofill" passkey requests (which pop that dialog on their own) are held.
+//  block: passkey and security-key sign-in is turned off.
+//  allow: untouched.
 const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 if (/^https?:$/.test(location.protocol)) {
   let cfg = null;
   try { cfg = ipcRenderer.sendSync('goat:fp-config'); } catch { /* ignore */ }
-  if (cfg && cfg.level !== 'off') {
-    const run = (cfgArg) => {
+  if (cfg && (cfg.level !== 'off' || cfg.webauthn !== 'allow')) {
+    const run = (cfgArg, ask) => {
       const origToString = Function.prototype.toString;
       const native = new WeakMap();
       const toString = { toString() { return native.has(this) ? native.get(this) : origToString.call(this); } }.toString;
@@ -32,6 +37,35 @@ if (/^https?:$/.test(location.protocol)) {
         native.set(g, origToString.call(d.get));
         try { Object.defineProperty(proto, prop, { ...d, get: g }); } catch (e) { /* ignore */ }
       };
+
+      // ---- passkeys / security keys
+      if (cfgArg.webauthn !== 'allow' && self.CredentialsContainer) {
+        const notAllowed = () => new DOMException('The operation either timed out or was not allowed.', 'NotAllowedError');
+        const hold = (signal) => new Promise((_, reject) => {
+          if (!signal) return;
+          const stop = () => reject(signal.reason || new DOMException('The operation was aborted.', 'AbortError'));
+          if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
+        });
+        for (const name of ['get', 'create']) {
+          wrap(CredentialsContainer.prototype, name, function (orig, args) {
+            const opts = args[0];
+            if (!opts || !opts.publicKey) return orig.apply(this, args);
+            // Autofill-style requests wait silently instead of popping a Windows dialog.
+            if (name === 'get' && opts.mediation === 'conditional') return hold(opts.signal);
+            if (cfgArg.webauthn === 'block') return Promise.reject(notAllowed());
+            return Promise.resolve(ask()).then((ok) => (ok ? orig.apply(this, args) : Promise.reject(notAllowed())));
+          });
+        }
+        if (self.PublicKeyCredential) {
+          wrap(PublicKeyCredential, 'isConditionalMediationAvailable', () => Promise.resolve(false));
+          wrap(PublicKeyCredential, 'getClientCapabilities', function (orig, args) {
+            return orig.apply(this, args).then((c) => ({ ...c, conditionalGet: false, conditionalCreate: false, passkeyPlatformAuthenticator: cfgArg.webauthn === 'block' ? false : c.passkeyPlatformAuthenticator }));
+          });
+          if (cfgArg.webauthn === 'block') wrap(PublicKeyCredential, 'isUserVerifyingPlatformAuthenticatorAvailable', () => Promise.resolve(false));
+        }
+      }
+
+      if (cfgArg.level === 'off') return;
 
       // Hardware: report a common machine.
       getter(Navigator.prototype, 'hardwareConcurrency', () => 8);
@@ -131,8 +165,12 @@ if (/^https?:$/.test(location.protocol)) {
       });
     };
     try {
-      if (contextBridge.executeInMainWorld) contextBridge.executeInMainWorld({ func: run, args: [cfg] });
-      else webFrame.executeJavaScript(`(${run})(${JSON.stringify(cfg)})`);
+      const ask = () => ipcRenderer.invoke('goat:webauthn-ask');
+      if (contextBridge.executeInMainWorld) contextBridge.executeInMainWorld({ func: run, args: [cfg, ask] });
+      else {
+        contextBridge.exposeInMainWorld('__goatWebAuthnAsk', ask);
+        webFrame.executeJavaScript(`(${run})(${JSON.stringify(cfg)}, window.__goatWebAuthnAsk)`);
+      }
     } catch (e) { /* page still works without the shield */ }
   }
 }

@@ -22,7 +22,8 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
   3rd-party cookie block, client-hint strip), ad blocker (Ghostery, levels ads/standard/strict, allowlist,
   custom rules), appearance/themes (built-in `THEMES` + custom themes from 5 colors), DNS (`DNS_PROVIDERS`,
   `applyDns`, `dnsStatus`), proxy, permissions, tabs (lazy restore, discard via `forcefullyCrashRenderer`,
-  memory saver, new-tab pages discarded after 5 s in background), tab groups ("folders"), bookmarks
+  memory saver, new-tab pages discarded after 5 s in background, private tabs on the in-memory
+  `privSes` partition, wiped when the last closes), tab groups ("folders"), bookmarks
   (`bookmarks.json`), memory/task list, fingerprint seed, extensions (electron-chrome-extensions +
   Chrome Web Store, pin list `settings.extensions.pinned`), popover panels (ad blocker panel, extensions
   menu), window (frameless, `titleBarOverlay` controls in the tab strip), lifecycle.
@@ -33,7 +34,8 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
   theme + motion + gradient tokens shared by every surface.
 - `src/pages-preload.js`: exposes `window.goat` only to `goat://newtab` and `goat://settings`; main
   re-checks the sender URL (`fromPage`).
-- `src/fp-preload.js`: fingerprint shield (standard/strict) for http(s) frames.
+- `src/fp-preload.js`: fingerprint shield (standard/strict) and passkey/WebAuthn gate (ask/allow/block)
+  for http(s) frames.
 - `scripts/patch-extensions.js`: idempotent string patches to `electron-chrome-extensions` (native
   messaging framing/UTF-8/Windows registry lookup for iCloud Passwords etc., chrome.privacy /
   declarativeContent / sidePanel stand-ins, toolbar right-click items, popup sizing). If the library is

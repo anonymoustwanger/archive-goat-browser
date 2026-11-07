@@ -20,6 +20,7 @@ const WARN = '<svg viewBox="0 0 16 16"><path d="M8 2 1.8 13h12.4z"/><path d="M8 
 const CLOSE = '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
 const SPEAKER = '<svg viewBox="0 0 16 16"><path d="M3 6h2.5L9 3v10L5.5 10H3z"/><path d="M11.5 5.5a3.5 3.5 0 0 1 0 5"/></svg>';
 const MUTED = '<svg viewBox="0 0 16 16"><path d="M3 6h2.5L9 3v10L5.5 10H3z"/><path d="m11 6 3 4M14 6l-3 4"/></svg>';
+const MASK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 6.5c2-1.4 4.2-1.6 6.5-.4 2.3-1.2 4.5-1 6.5.4-.2 2.6-1.6 4.4-3.6 4.4-1.3 0-2.2-.8-2.9-1.9-.7 1.1-1.6 1.9-2.9 1.9-2 0-3.4-1.8-3.6-4.4z"/><circle cx="5" cy="7.8" r=".9"/><circle cx="11" cy="7.8" r=".9"/></svg>';
 const FOLDER_CLOSED = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.2c0-.6.4-1 1-1h3.4l1.5 1.6h5.5c.6 0 1 .4 1 1v6.6c0 .6-.4 1-1 1H2.8c-.6 0-1-.4-1-1z" fill="currentColor" fill-opacity=".3"/></svg>';
 const FOLDER_OPEN = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 12V4.2c0-.6.4-1 1-1h3.4l1.5 1.6h4.5c.6 0 1 .4 1 1v1.4"/><path d="M1.8 12.4 3.6 7.6c.1-.4.5-.6.9-.6h9.3c.7 0 1.1.6.9 1.2l-1.5 4.2c-.1.4-.5.6-.9.6H2.3" fill="currentColor" fill-opacity=".3"/></svg>';
 
@@ -170,13 +171,16 @@ function updateTabEl(el, t) {
   el.classList.toggle('active', t.id === state.activeId);
   el.classList.toggle('loading', !!t.loading);
   el.classList.toggle('asleep', !!t.asleep);
+  el.classList.toggle('private', !!t.private);
   if (t.asleep) el.title = `${t.title}\nSleeping to save memory`;
   el.classList.toggle('in-group', !!g);
   for (const c of [...el.classList]) if (c.startsWith('c-')) el.classList.remove(c);
   if (g) el.classList.add(`c-${g.color}`);
   el.setAttribute('aria-selected', String(t.id === state.activeId));
   el.title = t.title + (t.url ? '\n' + t.url : '');
-  el.querySelector('.dot').textContent = t.url ? hostLetter(t) : 'g';
+  const dot = el.querySelector('.dot');
+  if (t.private) { if (!dot.querySelector('svg')) dot.innerHTML = MASK; }
+  else { if (dot.querySelector('svg')) dot.textContent = ''; dot.textContent = t.url ? hostLetter(t) : 'g'; }
   el.querySelector('.title').textContent = t.title;
   const audio = el.querySelector('.audio');
   audio.hidden = !(t.audible || t.muted);
@@ -308,6 +312,7 @@ function renderNav() {
   $('reload').title = t && t.loading ? 'Stop' : 'Reload (Ctrl+R)';
   $('progress').classList.toggle('on', !!(t && t.loading));
   if (!editing) address.value = t ? t.url : '';
+  document.documentElement.classList.toggle('in-private', !!(t && t.private));
 
   const s = t ? t.security : 'internal';
   if (sec.className !== s) {
@@ -380,6 +385,8 @@ goat.on('focus-address', () => { address.focus(); address.select(); });
 
 // ----------------------------------------------------------------- buttons
 $('newtab').addEventListener('click', () => goat.send('new-tab'));
+$('newtab').addEventListener('contextmenu', (e) => { e.preventDefault(); goat.send('new-tab-menu', e.clientX, e.clientY); });
+$('newtab').title = 'New tab (Ctrl+T) · right-click for a private tab';
 $('back').addEventListener('click', () => goat.send('back'));
 $('forward').addEventListener('click', () => goat.send('forward'));
 $('reload').addEventListener('click', () => {

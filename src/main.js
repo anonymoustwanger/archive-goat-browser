@@ -66,7 +66,7 @@ const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'
 const DEFAULT_SETTINGS = {
   searchEngine: 'duckduckgo',
   restoreTabs: true,
-  privacy: { fingerprint: 'standard', stripTracking: true },
+  privacy: { fingerprint: 'standard', stripTracking: true, webauthn: 'ask' },
   performance: { sleepAfterMin: 30 },
   showBookmarksBar: true,
   appearance: { theme: 'goat', motion: 'system', gradients: true, customThemes: [] },
@@ -112,6 +112,7 @@ protocol.registerSchemesAsPrivileged([
 let win = null;
 let ui = null;
 let ses = null;
+let privSes = null; // private tabs: in-memory only, wiped when the last one closes
 let blocker = null;
 let blockerPromise = Promise.resolve();
 let extensions = null;
@@ -201,6 +202,7 @@ async function applySettings(patch) {
   settings.appearance.gradients = settings.appearance.gradients !== false;
   if (!['off', 'standard', 'strict'].includes(settings.privacy.fingerprint)) settings.privacy.fingerprint = 'standard';
   settings.privacy.stripTracking = settings.privacy.stripTracking !== false;
+  if (!['ask', 'allow', 'block'].includes(settings.privacy.webauthn)) settings.privacy.webauthn = 'ask';
   if (settings.dns.provider !== 'off' && !DNS_PROVIDERS[settings.dns.provider]) settings.dns.provider = 'quad9';
   settings.dns.nextdnsId = String(settings.dns.nextdnsId || '').trim().replace(/[^a-z0-9]/gi, '').slice(0, 20);
   settings.dns.custom = String(settings.dns.custom || '').trim().slice(0, 300);
@@ -381,9 +383,11 @@ function onHeadersReceived(details, callback) {
 
 function attachRequestHandlers() {
   const filter = { urls: ['<all_urls>'] };
-  ses.webRequest.onBeforeRequest(filter, onBeforeRequest);
-  ses.webRequest.onBeforeSendHeaders(filter, onBeforeSendHeaders);
-  ses.webRequest.onHeadersReceived(filter, onHeadersReceived);
+  for (const s of allSessions()) {
+    s.webRequest.onBeforeRequest(filter, onBeforeRequest);
+    s.webRequest.onBeforeSendHeaders(filter, onBeforeSendHeaders);
+    s.webRequest.onHeadersReceived(filter, onHeadersReceived);
+  }
 }
 
 // ---------------------------------------------------------------- ad blocker
@@ -404,7 +408,7 @@ async function loadBlocker(level) {
 
 function disableBlocker() {
   if (!blocker) return;
-  try { blocker.disableBlockingInSession(ses); } catch { /* already off */ }
+  for (const s of allSessions()) { try { blocker.disableBlockingInSession(s); } catch { /* already off */ } }
   blocker = null;
   attachRequestHandlers();
 }
@@ -424,6 +428,12 @@ async function reloadBlocker() {
     if (rules.length) b.updateFromDiff({ added: rules });
     blocker = b;
     b.enableBlockingInSession(ses);
+    if (privSes) {
+      // The blocker registers global IPC handlers per session; clear them before the second one.
+      ipcMain.removeHandler('@ghostery/adblocker/inject-cosmetic-filters');
+      ipcMain.removeHandler('@ghostery/adblocker/is-mutation-observer-enabled');
+      b.enableBlockingInSession(privSes);
+    }
     // Respect the allowlist for cosmetic filtering too.
     ipcMain.removeHandler('@ghostery/adblocker/inject-cosmetic-filters');
     ipcMain.handle('@ghostery/adblocker/inject-cosmetic-filters', (event, url, msg) => {
@@ -569,8 +579,9 @@ function proxyConfig() {
 
 async function applyProxy() {
   const cfg = proxyConfig();
-  await Promise.allSettled([ses.setProxy(cfg), session.defaultSession.setProxy(cfg)]);
-  await Promise.allSettled([ses.closeAllConnections(), session.defaultSession.closeAllConnections()]);
+  const list = [...allSessions(), session.defaultSession];
+  await Promise.allSettled(list.map((s) => s.setProxy(cfg)));
+  await Promise.allSettled(list.map((s) => s.closeAllConnections()));
 }
 
 app.on('login', (event, _wc, _details, authInfo, callback) => {
@@ -622,27 +633,18 @@ function onPermissionCheck(_wc, permission, requestingOrigin) {
 }
 
 // -------------------------------------------------------------------- session
-function setupSession() {
-  ses = session.fromPartition('persist:goat'); // cookies & site data survive restarts
-  ses.setUserAgent(USER_AGENT, 'en-US,en;q=0.9');
-  ses.setSpellCheckerEnabled(false);
-  ses.setPermissionRequestHandler(onPermissionRequest);
-  ses.setPermissionCheckHandler(onPermissionCheck);
-  ses.setDevicePermissionHandler(() => false);
-  ses.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'pages-preload.js') });
-  ses.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'fp-preload.js') });
-  attachRequestHandlers();
+const allSessions = () => [ses, privSes].filter(Boolean);
 
-  ses.protocol.handle(SCHEME, (req) => {
-    const u = new URL(req.url);
-    const rel = path.normalize(path.join(u.hostname, decodeURIComponent(u.pathname)));
-    let file = path.join(PAGES_DIR, rel);
-    if (!file.startsWith(PAGES_DIR + path.sep)) return new Response('Not found', { status: 404 });
-    if (u.pathname === '/' || u.pathname === '') file = path.join(file, 'index.html');
-    return net.fetch(pathToFileURL(file).toString());
-  });
-
-  ses.on('will-download', (_e, item) => {
+function configureSession(s) {
+  s.setUserAgent(USER_AGENT, 'en-US,en;q=0.9');
+  s.setSpellCheckerEnabled(false);
+  s.setPermissionRequestHandler(onPermissionRequest);
+  s.setPermissionCheckHandler(onPermissionCheck);
+  s.setDevicePermissionHandler(() => false);
+  s.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'pages-preload.js') });
+  s.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'fp-preload.js') });
+  s.protocol.handle(SCHEME, serveInternal);
+  s.on('will-download', (_e, item) => {
     item.once('done', (_ev, state) => {
       const name = item.getFilename();
       toast(state === 'completed' ? `Downloaded ${name}` : `Download ${state}: ${name}`);
@@ -650,18 +652,44 @@ function setupSession() {
   });
 }
 
+function serveInternal(req) {
+  const u = new URL(req.url);
+  const rel = path.normalize(path.join(u.hostname, decodeURIComponent(u.pathname)));
+  let file = path.join(PAGES_DIR, rel);
+  if (!file.startsWith(PAGES_DIR + path.sep)) return new Response('Not found', { status: 404 });
+  if (u.pathname === '/' || u.pathname === '') file = path.join(file, 'index.html');
+  return net.fetch(pathToFileURL(file).toString());
+}
+
+function setupSession() {
+  ses = session.fromPartition('persist:goat'); // cookies & site data survive restarts
+  privSes = session.fromPartition('goat-private'); // no "persist:" = memory only
+  configureSession(ses);
+  configureSession(privSes);
+  attachRequestHandlers();
+}
+
+// Private tabs share one in-memory session; when the last one closes it is wiped.
+async function wipePrivateIfUnused() {
+  if (!privSes || [...tabs.values()].some((t) => t.private)) return;
+  await Promise.allSettled([
+    privSes.clearStorageData(), privSes.clearCache(), privSes.clearAuthCache(),
+    privSes.clearHostResolverCache(), privSes.clearCodeCaches({}),
+  ]);
+}
+
 // ----------------------------------------------------------------------- tabs
-function createTab(url, { activate = true, groupId = null, position = 'afterActive', lazy = false } = {}) {
+function createTab(url, { activate = true, groupId = null, position = 'afterActive', lazy = false, private: isPrivate = false } = {}) {
   const id = nextId++;
   const view = new WebContentsView({
     webPreferences: {
-      session: ses, contextIsolation: true, sandbox: true, nodeIntegration: false,
+      session: isPrivate ? privSes : ses, contextIsolation: true, sandbox: true, nodeIntegration: false,
       spellcheck: false, safeDialogs: true, navigateOnDragDrop: true,
     },
   });
   // Theme color for Goat's own pages avoids a white flash; web pages get white.
   view.setBackgroundColor(url && /^https?:/i.test(url) ? '#ffffff' : appearance().bg);
-  const tab = { id, view, title: '', blocked: 0, groupId: groups.has(groupId) ? groupId : null, lastActive: Date.now() };
+  const tab = { id, view, title: '', blocked: 0, groupId: groups.has(groupId) ? groupId : null, lastActive: Date.now(), private: !!isPrivate };
   tabs.set(id, tab);
 
   if (tab.groupId) {
@@ -682,10 +710,10 @@ function createTab(url, { activate = true, groupId = null, position = 'afterActi
   const wc = view.webContents;
   wc.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   wireTab(tab);
-  if (extensions) extensions.addTab(wc, win);
+  if (extensions && !isPrivate) extensions.addTab(wc, win); // extensions stay out of private tabs
   // Restored background tabs load when first opened, so startup stays fast.
   if (lazy && url && !activate) pendingUrls.set(wc, url);
-  else wc.loadURL(url || NEWTAB_URL);
+  else wc.loadURL(url || (isPrivate ? NEWTAB_URL + '?private=1' : NEWTAB_URL));
   if (activate) activateTab(id, !url);
   else scheduleState();
   saveTabsSoon();
@@ -722,7 +750,7 @@ function wireTab(tab) {
       };
     }
     if (/^(https?|goat):/.test(url)) {
-      createTab(url, { activate: disposition !== 'background-tab', groupId: tab.groupId });
+      createTab(url, { activate: disposition !== 'background-tab', groupId: tab.groupId, private: tab.private });
     }
     return { action: 'deny' };
   });
@@ -807,7 +835,7 @@ function activateTab(id, focusAddress = false) {
   }
   t.lastActive = Date.now();
   for (const other of tabs.values()) other.view.setVisible(other.id === id);
-  if (extensions) extensions.selectTab(t.view.webContents);
+  if (extensions && !t.private) extensions.selectTab(t.view.webContents);
   activeId = id;
   layout();
   if (focusAddress) { ui.webContents.focus(); ui.webContents.send('focus-address'); }
@@ -823,7 +851,8 @@ function destroyTab(id) {
   tabs.delete(id);
   order = order.filter((x) => x !== id);
   win.contentView.removeChildView(t.view);
-  try { extensions?.removeTab(t.view.webContents); } catch { /* not tracked */ }
+  if (!t.private) { try { extensions?.removeTab(t.view.webContents); } catch { /* not tracked */ } }
+  if (t.private) setImmediate(wipePrivateIfUnused);
   if (!t.view.webContents.isDestroyed()) t.view.webContents.close();
 }
 
@@ -1044,7 +1073,8 @@ function tabMenu(id) {
   const wc = t.view.webContents;
   const others = [...groups.values()].filter((g) => g.id !== t.groupId);
   const items = [
-    { label: 'New tab to the right', click: () => { activateTab(id); createTab(null, { groupId: t.groupId }); } },
+    { label: 'New tab to the right', click: () => { activateTab(id); createTab(null, { groupId: t.groupId, private: t.private }); } },
+    { label: 'New private tab', accelerator: 'CmdOrCtrl+Shift+N', click: () => createTab(null, { position: 'end', private: true }) },
     { type: 'separator' },
     { label: 'Add to new group', click: () => newGroupWith([id]) },
   ];
@@ -1058,7 +1088,7 @@ function tabMenu(id) {
   items.push(
     { type: 'separator' },
     { label: 'Reload', click: () => wc.reload() },
-    { label: 'Duplicate', click: () => { const u = wc.getURL(); activateTab(id); createTab(u, { groupId: t.groupId }); } },
+    { label: 'Duplicate', click: () => { const u = wc.getURL(); activateTab(id); createTab(u, { groupId: t.groupId, private: t.private }); } },
     { label: wc.isAudioMuted() ? 'Unmute site' : 'Mute site', click: () => { wc.setAudioMuted(!wc.isAudioMuted()); scheduleState(); } },
     { type: 'separator' },
     { label: 'Close tab', click: () => closeTab(id) },
@@ -1078,7 +1108,7 @@ function saveTabsNow() {
   if (!settings) return;
   const data = {
     groups: [...groups.values()],
-    tabs: order.map((id) => {
+    tabs: order.filter((id) => !tabs.get(id).private).map((id) => {
       const t = tabs.get(id);
       const url = t.view.webContents.isDestroyed() ? '' : displayUrl(t.view.webContents);
       return { url, title: t.title, groupId: t.groupId, active: id === activeId };
@@ -1118,6 +1148,7 @@ function handleShortcut(event, input) {
   const k = input.key.toLowerCase();
   let handled = true;
   if (mod && !input.shift && k === 't') createTab(null, { position: 'end' });
+  else if (mod && input.shift && k === 'n') createTab(null, { position: 'end', private: true });
   else if (mod && k === 'w') closeTab(activeId);
   else if ((mod && k === 'l') || (input.alt && k === 'd') || k === 'f6') {
     ui.webContents.focus(); ui.webContents.send('focus-address');
@@ -1145,9 +1176,11 @@ function showContextMenu(wc, p) {
   const items = [];
   const sep = { type: 'separator' };
   const groupId = tabByWebContentsId(wc.id)?.groupId || null;
+  const isPriv = !!tabByWebContentsId(wc.id)?.private;
   if (p.linkURL) {
     items.push(
-      { label: 'Open link in new tab', click: () => createTab(p.linkURL, { activate: false, groupId }) },
+      { label: isPriv ? 'Open link in new private tab' : 'Open link in new tab', click: () => createTab(p.linkURL, { activate: false, groupId, private: isPriv }) },
+      ...(isPriv ? [] : [{ label: 'Open link in private tab', click: () => createTab(p.linkURL, { position: 'end', private: true }) }]),
       { label: 'Copy link', click: () => clipboard.writeText(p.linkURL) },
       sep,
     );
@@ -1211,6 +1244,7 @@ function pushState() {
         canForward: wc.navigationHistory.canGoForward(),
         blocked: t.blocked,
         allowlisted: /^https?:/.test(url) && isAllowlisted(url),
+        private: !!t.private,
         asleep: !!t.discarded || pendingUrls.has(wc) || wc.getURL().startsWith(`${SCHEME}://sleep/`),
         muted: wc.isAudioMuted(),
         audible: wc.isCurrentlyAudible(),
@@ -1420,7 +1454,7 @@ function setBookmarksBar(show) {
 function openBookmarkUrl(url, how) {
   if (how === 'new' || how === 'background') {
     const g = tabs.get(activeId)?.groupId || null;
-    createTab(url, { activate: how === 'new', groupId: null, position: 'end' });
+    createTab(url, { activate: how === 'new', groupId: null, position: 'end', private: !!tabs.get(activeId)?.private });
     return g;
   }
   activeWc()?.loadURL(url);
@@ -1791,6 +1825,10 @@ function toggleSiteShield() {
 function wireUiIpc() {
   ipcMain.on('navigate', fromUi((text) => navigate(text)));
   ipcMain.on('new-tab', fromUi(() => createTab(null, { position: 'end' })));
+  ipcMain.on('new-tab-menu', fromUi((x, y) => popupAt(Menu.buildFromTemplate([
+    { label: 'New tab', accelerator: 'CmdOrCtrl+T', click: () => createTab(null, { position: 'end' }) },
+    { label: 'New private tab', accelerator: 'CmdOrCtrl+Shift+N', click: () => createTab(null, { position: 'end', private: true }) },
+  ]), x, y)));
   ipcMain.on('close-tab', fromUi((id) => closeTab(id)));
   ipcMain.on('activate', fromUi((id) => activateTab(id)));
   ipcMain.on('back', fromUi(() => activeWc()?.navigationHistory.goBack()));
@@ -1844,11 +1882,34 @@ function cookieUrl(c) {
 function wirePagesIpc() {
   ipcMain.on('goat:fp-config', (event) => {
     const url = event.senderFrame && event.senderFrame.url;
-    const level = settings ? settings.privacy.fingerprint : 'off';
+    if (!settings || !url || !/^https?:/.test(url)) { event.returnValue = { level: 'off', webauthn: 'allow' }; return; }
     let top = url;
     try { top = event.sender.getURL() || url; } catch { /* ignore */ }
-    if (!url || !/^https?:/.test(url) || level === 'off') { event.returnValue = { level: 'off' }; return; }
-    event.returnValue = { level, seed: fpSeed(top || url), chrome: CHROME_MAJOR };
+    event.returnValue = { level: settings.privacy.fingerprint, webauthn: settings.privacy.webauthn, seed: fpSeed(top || url), chrome: CHROME_MAJOR };
+  });
+  // A site wants a passkey / security key: ask before Windows shows its dialog.
+  const webauthnAllowed = new Map(); // origin -> true (this run only)
+  const webauthnPending = new Map();
+  ipcMain.handle('goat:webauthn-ask', async (event) => {
+    const frame = event.senderFrame;
+    const origin = frame ? frame.origin : '';
+    if (!/^https:\/\//.test(origin) && !/^http:\/\/(localhost|127\.)/.test(origin)) return false;
+    if (settings.privacy.webauthn === 'allow' || webauthnAllowed.get(origin)) return true;
+    if (settings.privacy.webauthn === 'block') return false;
+    if (webauthnPending.has(origin)) return webauthnPending.get(origin);
+    const host = origin.replace(/^https?:\/\//, '');
+    const p = dialog.showMessageBox(win, {
+      type: 'question', buttons: ['Not now', 'Continue'], defaultId: 1, cancelId: 0,
+      message: `${host} wants to sign you in with a passkey or security key.`,
+      detail: 'Windows will ask for Windows Hello, your phone, or a USB security key. Choose "Not now" to sign in another way.',
+      checkboxLabel: 'Allow for this site until Goat closes', checkboxChecked: false,
+    }).then(({ response, checkboxChecked }) => {
+      const ok = response === 1;
+      if (ok && checkboxChecked) webauthnAllowed.set(origin, true);
+      return ok;
+    }).catch(() => false).finally(() => webauthnPending.delete(origin));
+    webauthnPending.set(origin, p);
+    return p;
   });
   ipcMain.on('goat:appearance-get', (event) => {
     const url = event.senderFrame && event.senderFrame.url;
@@ -2235,7 +2296,7 @@ if (process.env.GOAT_TEST) {
   global.__goat = {
     createTab, newGroupWith, setGroupCollapsed, addToGroup, removeFromGroup, applySettings, mergeTabs, moveGroup,
     togglePanel, hidePanel, panel: () => panel, addBookmark, bookmarks: () => bookmarks, toggleBookmarkForActive,
-    sleepTab, discardTab, activateTab, pendingUrls, listExtensions, shield: () => shieldState,
+    sleepTab, discardTab, activateTab, pendingUrls, listExtensions, shield: () => shieldState, closeTabById: (id) => closeTab(id),
     groups, tabs, order: () => order, activeId: () => activeId, session: () => ses, pushState,
   };
 }

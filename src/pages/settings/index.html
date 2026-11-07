@@ -132,6 +132,14 @@
             <label><input type="radio" name="fp" value="strict" data-key="privacy.fingerprint"> <span><b>Strict</b><small>Also adds tiny per-site noise to canvas and audio readouts. Rarely, image editors or games may misbehave.</small></span></label>
           </div>
         </div>
+        <div class="row col">
+          <span><b>Passkeys and security keys</b><small>Some sites start a passkey sign-in on their own, which makes Windows pop up "use your security key".</small></span>
+          <div class="radios">
+            <label><input type="radio" name="wa" value="ask" data-key="privacy.webauthn"> <span><b>Ask first</b><small>Goat asks before a site can open the Windows passkey dialog, and stops sites from opening it by themselves. Recommended.</small></span></label>
+            <label><input type="radio" name="wa" value="allow" data-key="privacy.webauthn"> <span><b>Allow</b><small>Sites use passkeys and security keys like in Chrome.</small></span></label>
+            <label><input type="radio" name="wa" value="block" data-key="privacy.webauthn"> <span><b>Block</b><small>Never use passkeys or security keys. Sites fall back to passwords or codes.</small></span></label>
+          </div>
+        </div>
         <label class="row"><span><b>Remove tracking from links</b><small>Strips tags like utm_source, fbclid and gclid from addresses you open.</small></span>
           <input type="checkbox" class="toggle" data-key="privacy.stripTracking">
         </label>

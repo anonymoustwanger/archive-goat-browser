@@ -1,4 +1,6 @@
 'use strict';
+const isPrivate = new URLSearchParams(location.search).has('private');
+if (isPrivate) { document.body.classList.add('private'); document.getElementById('privnote').hidden = false; document.title = 'New private tab'; }
 document.getElementById('search').addEventListener('submit', (e) => {
   e.preventDefault();
   const q = document.getElementById('q').value.trim();

@@ -29,6 +29,8 @@ Your profile (cookies, settings, open tabs, blocklists) lives in `%APPDATA%\Goat
 - **Bookmarks bar.** Click the ☆ in the address bar (or `Ctrl+D`) to bookmark a page. Drag a tab onto the bar to bookmark it. Drag bookmarks to reorder, or onto a folder to file them. Right-click for rename, delete, new folder, or to hide the bar (`Ctrl+Shift+B`). Middle-click opens in a new tab.
 - **Title bar.** No separate title bar: minimize, maximize and close sit at the right end of the tab strip and follow the theme. Drag empty tab-strip space to move the window.
 - **Animations.** Tabs, folders, toasts, loading bar and pages animate. Settings → Appearance → Animations: Follow system, On, or Off.
+- **Private tabs.** `Ctrl+Shift+N`, right-click the + button, or right-click a link. Private tabs share an in-memory session (cookies, storage, cache) that is wiped when the last private tab closes; they're never saved or restored, and extensions don't run in them. Marked with a mask icon and a "Private" badge.
+- **Passkeys and security keys.** Settings → Privacy. "Ask first" (default) stops sites from popping up the Windows security-key dialog by themselves and asks before a site can open it. Also "Allow" and "Block".
 - **Fingerprint protection.** Standard: common hardware/GPU values, exact OS/CPU client hints stripped, no Battery API. Strict: plus per-site canvas and audio noise. Settings → Privacy.
 - **Link cleaning.** Tracking tags (utm_*, fbclid, gclid, msclkid, YouTube/Spotify `si`, and more) are removed from addresses you open.
 - **Privacy Sandbox off.** Topics, Protected Audience (FLEDGE), Attribution Reporting and Shared Storage are disabled.
@@ -39,7 +41,7 @@ Your profile (cookies, settings, open tabs, blocklists) lives in `%APPDATA%\Goat
 
 ## Shortcuts
 
-`Ctrl+T` new tab · `Ctrl+W` close · `Ctrl+L` address bar · `Ctrl+Tab` / `Ctrl+Shift+Tab` switch · `Ctrl+1…9` jump · `Ctrl+R` / `F5` reload · `Alt+←/→` back/forward · `Ctrl+F` find · `Ctrl+ +/−/0` zoom · `Ctrl+,` settings · `Ctrl+D` bookmark · `Ctrl+Shift+B` bookmarks bar · `Ctrl+Shift+Del` clear data · `F11` fullscreen · `F12` devtools.
+`Ctrl+T` new tab · `Ctrl+Shift+N` private tab · `Ctrl+W` close · `Ctrl+L` address bar · `Ctrl+Tab` / `Ctrl+Shift+Tab` switch · `Ctrl+1…9` jump · `Ctrl+R` / `F5` reload · `Alt+←/→` back/forward · `Ctrl+F` find · `Ctrl+ +/−/0` zoom · `Ctrl+,` settings · `Ctrl+D` bookmark · `Ctrl+Shift+B` bookmarks bar · `Ctrl+Shift+Del` clear data · `F11` fullscreen · `F12` devtools.
 
 ## Limits
 

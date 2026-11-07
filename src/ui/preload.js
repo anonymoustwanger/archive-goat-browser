@@ -21,7 +21,7 @@ const OUT = new Set(['navigate', 'new-tab', 'close-tab', 'activate', 'back', 'fo
   'reload', 'stop', 'settings', 'shield', 'focus-page', 'find', 'find-stop',
   'tab-menu', 'group-menu', 'group-toggle', 'group-rename', 'move-tab',
   'merge-tabs', 'move-group', 'add-to-group',
-  'bm-open', 'bm-star', 'bm-menu', 'bm-bar-menu', 'bm-folder', 'bm-overflow', 'bm-move', 'bm-rename', 'bm-add-tab', 'preconnect', 'ext-menu']);
+  'bm-open', 'bm-star', 'bm-menu', 'bm-bar-menu', 'bm-folder', 'bm-overflow', 'bm-move', 'bm-rename', 'bm-add-tab', 'preconnect', 'ext-menu', 'new-tab-menu']);
 const IN = new Set(['state', 'focus-address', 'find-open', 'find-close', 'find-result', 'toast', 'rename-group', 'appearance', 'bm-rename-start']);
 
 contextBridge.exposeInMainWorld('goat', {

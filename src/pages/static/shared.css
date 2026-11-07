@@ -102,3 +102,10 @@ body.has-bookmarks .facts { display: none; }
 .adderr { margin: 8px 0 0; color: var(--danger); font-size: 13px; }
 @media (max-width: 560px) { .addfields { grid-template-columns: 1fr; } }
 main { width: min(720px, 100%); }
+
+/* private new tab */
+.privnote { margin: -8px auto 20px; max-width: 560px; text-align: center; font-size: 13px; color: var(--muted); }
+.privnote b { color: #c4b5fd; }
+body.private { background: radial-gradient(900px 520px at 50% -10%, rgba(167, 139, 250, .18), transparent 70%), var(--bg); }
+body.private .mark { background: linear-gradient(135deg, #a78bfa, #f0abfc); -webkit-background-clip: text; background-clip: text; }
+body.private .facts { display: none; }

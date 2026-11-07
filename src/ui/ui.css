@@ -306,3 +306,15 @@ browser-action-list::part(badge) { font-size: 9px; border-radius: 4px; padding: 
 #extbtn:hover svg { transform: rotate(-8deg); transition: transform var(--dur-2) var(--ease-spring); }
 
 #settings svg { width: 17px; height: 17px; stroke-width: 1.9; }
+
+/* private tabs */
+.tab.private { --pv: #a78bfa; }
+.tab.private .dot { background: color-mix(in srgb, var(--pv) 28%, transparent); color: var(--pv); }
+.tab.private .dot svg { width: 13px; height: 13px; stroke-width: 1.4; fill: currentColor; fill-opacity: .25; }
+.tab.private.active { background: color-mix(in srgb, var(--pv) 14%, var(--nav-bg)); }
+.tab.private:not(.in-group)::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; border-radius: 2px; background: var(--pv); }
+:root.in-private #addressform { border-color: color-mix(in srgb, #a78bfa 55%, var(--line)); }
+:root.in-private #addressform::before {
+  content: "Private"; font-size: 11px; font-weight: 600; color: #c4b5fd; background: color-mix(in srgb, #a78bfa 22%, transparent);
+  padding: 2px 8px; border-radius: 999px; margin-right: 2px; flex: none;
+}
