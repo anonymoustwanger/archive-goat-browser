@@ -12,9 +12,13 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
 - `npm install`: installs deps and runs `scripts/patch-extensions.js` (postinstall). Required before anything else.
 - `npm start`: build the toolbar preload bundle, then run Goat from source.
 - `npm run build`: re-apply library patches + bundle `src/ui/preload.js` to `src/ui/preload.bundle.js` (esbuild).
-- `npm run installer`: package, then build `dist\GoatBrowserSetup-<version>.exe` with NSIS (`installer/goat.nsi`,
-  per-user, HKCU registration as a browser: StartMenuInternet + RegisteredApplications + `GoatHTML` ProgID).
-  On Linux: `makensis -DVERSION=x.y.z installer/goat.nsi`.
+- `npm run installer`: package, then build `dist\GoatBrowserSetup-<version>.exe` with NSIS. `installer/goat.nsi` is
+  only a silent bootstrapper (Banner while unpacking to $PLUGINSDIR, then `GoatBrowser.exe --goat-setup`).
+  The real installer/uninstaller is `src/setup.js` + `src/setup/` (HTML UI): copies with `original-fs` (asar!),
+  `.goat-installed` marker, shortcuts via `shell.writeShortcutLink`, HKCU registry via one `reg import` (.reg,
+  UTF-16), UninstallString = `GoatBrowser.exe --goat-uninstall`, self-delete via detached cmd after exit (only a
+  folder with the marker). `--goat-quit` helper: takes the single-instance lock; running Goat gets it in
+  `second-instance`, kills its private/Tor window processes and quits. On Linux: `makensis -DVERSION=x.y.z installer/goat.nsi`.
 - `npm run appimage` (Linux): `package:linux` then `installer/linux/build-appimage.sh` (AppDir with AppRun that adds
   `--no-sandbox` only when unprivileged userns are blocked). Tested: AppImage starts with the sandbox on.
 - `website/`: static Cloudflare Pages site (no build step; output directory `website`). Download buttons point at

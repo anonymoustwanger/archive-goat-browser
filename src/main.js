@@ -1,4 +1,9 @@
 'use strict';
+// Installer, uninstaller and the "please close" helper live in setup.js.
+if (process.argv.some((a) => a === '--goat-setup' || a === '--goat-uninstall' || a === '--goat-quit')) {
+  require('./setup');
+  return; // CommonJS module: stop here
+}
 // Goat Browser — a private, fast browser built on Chromium (via Electron).
 // Cookies and site data persist in the profile; trackers, ads and third-party
 // cookies are blocked; DNS goes over HTTPS; http:// is upgraded; sites must ask
@@ -48,10 +53,14 @@ function cleanStaleWindowProfiles() {
     if (!alive) fs.rm(path.join(app.getPath('temp'), n), { recursive: true, force: true }, () => {});
   }
 }
+const windowProcs = new Set(); // private/Tor windows we started (closed with us for updates)
 function openWindow(mode) {
   const args = [...(process.defaultApp ? [process.argv[1]] : []), `--goat-window=${mode}`];
   try {
-    require('child_process').spawn(process.execPath, args, { detached: true, stdio: 'ignore' }).unref();
+    const child = require('child_process').spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
+    windowProcs.add(child);
+    child.on('exit', () => windowProcs.delete(child));
+    child.unref();
   } catch (err) { toast(`Couldn't open window: ${err.message}`); }
 }
 
@@ -2454,6 +2463,7 @@ function wirePagesIpc() {
     customVars: Object.fromEntries(settings.appearance.customThemes.map((t) => [t.id, customVars(t.colors)])),
     version: require(path.join(__dirname, "..", "package.json")).version,
     chrome: process.versions.chrome,
+    installed: fs.existsSync(path.join(path.dirname(process.execPath), '.goat-installed')),
   })));
   ipcMain.handle('goat:settings-set', fromPage('settings', (patch) => applySettings(patch)));
   ipcMain.handle('goat:blocker-status', fromPage('settings', () => blockerStatus()));
@@ -2494,6 +2504,15 @@ function wirePagesIpc() {
     return true;
   }));
   ipcMain.handle('goat:tasks', fromPage('settings', () => taskList()));
+  ipcMain.handle('goat:uninstall', fromPage('settings', async () => {
+    const r = await dialog.showMessageBox(win, {
+      type: 'question', buttons: ['Cancel', 'Uninstall…'], defaultId: 0, cancelId: 0,
+      message: 'Uninstall Goat Browser?', detail: 'Goat will close and the uninstaller will open. You can choose there whether to keep your profile.',
+    });
+    if (r.response !== 1) return false;
+    require('child_process').spawn(process.execPath, [...(process.defaultApp ? [process.argv[1]] : []), '--goat-uninstall'], { detached: true, stdio: 'ignore' }).unref();
+    return true;
+  }));
   ipcMain.handle('goat:tor-status', fromPage('settings', () => ({ ...tor.status(), enabled: settings.tor.enabled })));
   ipcMain.handle('goat:tor-newcircuit', fromPage('settings', async () => {
     const ok = await tor.newCircuit().catch(() => false);
@@ -2761,6 +2780,12 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', (_e, argv) => {
+    if (argv.includes('--goat-quit')) {
+      // The installer or uninstaller needs Goat closed: save everything and exit.
+      for (const c of windowProcs) { try { c.kill(); } catch { /* gone */ } }
+      app.quit();
+      return;
+    }
     if (!win) return;
     if (win.isMinimized()) win.restore();
     win.focus();

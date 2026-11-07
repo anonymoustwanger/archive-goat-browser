@@ -53,6 +53,7 @@ if (host === 'history') {
       clear: call('cookies-clear'),
     },
     clearBrowsingData: call('clear-data'),
+    uninstall: call('uninstall'),
     tasks: { list: call('tasks'), sleep: call('task-sleep'), close: call('task-close') },
     dns: { status: call('dns-status'), openCheck: call('dns-check') },
     tor: {

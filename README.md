@@ -8,7 +8,8 @@ A private, fast browser built on Chromium 156 via Electron 45.
 
 ## Run
 
-- **Installer:** `dist\GoatBrowserSetup-<version>.exe`. Installs for your user only (no admin), adds Start menu and desktop shortcuts, an uninstaller in Windows "Apps", and lists Goat in Default apps. Your profile is kept. Build it with `npm run installer` (needs [NSIS](https://nsis.sourceforge.io/) installed).
+- **Installer:** `dist\GoatBrowserSetup-<version>.exe`. Opens Goat's own setup screen: desktop shortcut, default-browser and location options, progress, then "Open Goat Browser". Installs for your user only (no admin) into `%LOCALAPPDATA%\Programs\Goat Browser`, adds a Start menu shortcut, an entry in Windows "Apps", and lists Goat in Default apps. Running a newer installer updates Goat and keeps your profile.
+- **Uninstall:** Windows Settings → Apps → Goat Browser → Uninstall, or Goat Settings → About → Uninstall. Goat's uninstall screen asks whether to also delete your profile. Build it with `npm run installer` (needs [NSIS](https://nsis.sourceforge.io/) installed).
 - **Linux:** `dist/GoatBrowser-<version>-x86_64.AppImage`. Make it executable (`chmod +x`, or right-click → Properties → allow executing) and double-click. Build with `npm run appimage` on Linux (needs [appimagetool](https://github.com/AppImage/appimagetool) on PATH or in `$APPIMAGETOOL`). Profile: `~/.config/Goat Browser`.
   <a id="linux"></a>Chromium's sandbox needs unprivileged user namespaces. On Ubuntu 24.04+ they're blocked by AppArmor, so the AppImage starts without the sandbox and some extensions may not fully work. To keep the sandbox, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (add it to `/etc/sysctl.d/` to keep it after reboot).
 - **Ready-made:** `dist\Goat Browser-win32-x64\GoatBrowser.exe`. Windows SmartScreen may warn because the exe is unsigned: choose "More info", then "Run anyway".

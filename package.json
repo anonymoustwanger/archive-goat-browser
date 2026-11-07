@@ -1,6 +1,6 @@
 {
   "name": "goat-browser",
-  "version": "4.6.0",
+  "version": "4.7.0",
   "description": "Goat Browser: private, fast Chromium browser",
   "main": "src/main.js",
   "scripts": {

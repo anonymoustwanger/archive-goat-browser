@@ -588,6 +588,8 @@ $('ed-delete').addEventListener('click', async () => {
   window.addEventListener('focus', () => api.extensions.list().then(renderExtensions));
   markNav();
   $('about-text').textContent = `Goat Browser ${info.version} · Chromium ${info.chrome}. Data folder: your Goat Browser profile in %APPDATA%.`;
+  $('uninstallrow').hidden = !info.installed;
+  $('uninstall').addEventListener('click', () => api.uninstall());
   if (location.hash) document.querySelector(location.hash)?.scrollIntoView();
   markNav();
 })();
