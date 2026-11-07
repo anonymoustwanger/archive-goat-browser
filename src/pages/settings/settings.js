@@ -50,6 +50,80 @@ function fillFields() {
   markRestart();
 }
 
+// ------------------------------------------------------------- user profiles
+let PINFO = null;
+function renderProfileList() {
+  const box = $('profilelist');
+  box.textContent = '';
+  for (const p of PINFO.list) {
+    const isCur = p.id === PINFO.current;
+    const dot = el('button', { type: 'button', class: 'pdot', title: 'Change color', style: `--pc:${p.color}`,
+      onclick: async () => {
+        const i = PINFO.colors.indexOf(p.color);
+        PINFO = await api.profiles.update(p.id, { color: PINFO.colors[(i + 1) % PINFO.colors.length] });
+        renderProfileList();
+      } }, (p.name || '?').charAt(0).toUpperCase());
+    const name = el('input', { class: 'pname', value: p.name, maxLength: 40, spellcheck: false, 'aria-label': 'Profile name',
+      onchange: async () => { PINFO = await api.profiles.update(p.id, { name: name.value }); renderProfileList(); } });
+    const btns = el('span', { class: 'pbtns' });
+    if (isCur) btns.append(el('span', { class: 'pill' }, 'This window'));
+    else btns.append(el('button', { type: 'button', onclick: () => { api.profiles.open(p.id); flash($('profilemsg'), `Opening ${p.name}…`); } }, 'Open'));
+    if (PINFO.canShortcut) btns.append(el('button', { type: 'button', title: 'Put a shortcut that opens this profile on your desktop', onclick: async () => { flash($('profilemsg'), (await api.profiles.shortcut(p.id)) ? 'Desktop shortcut added' : "Couldn't add shortcut"); } }, 'Shortcut'));
+    if (p.id !== 'default' && !isCur) btns.append(el('button', { type: 'button', class: 'danger', onclick: async () => {
+      if (!confirmDelete(p)) return;
+      const r = await api.profiles.remove(p.id);
+      PINFO = r.info; renderProfileList();
+      flash($('profilemsg'), r.ok ? `${p.name} deleted` : r.error);
+    } }, 'Delete'));
+    box.append(el('div', { class: 'prow' + (isCur ? ' cur' : '') }, dot, name, btns));
+  }
+}
+function confirmDelete(p) {
+  const b = document.querySelector(`[data-confirm="${p.id}"]`);
+  if (b) return true;
+  // Two-click delete: first click arms it for 4 s.
+  const msg = $('profilemsg');
+  if (msg.dataset.arm === p.id) { delete msg.dataset.arm; return true; }
+  msg.dataset.arm = p.id;
+  flash(msg, `Click Delete again to erase ${p.name} and all its data`);
+  setTimeout(() => { if (msg.dataset.arm === p.id) delete msg.dataset.arm; }, 4000);
+  return false;
+}
+$('profileform').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const n = $('profilename').value.trim();
+  if (!n) return;
+  const r = await api.profiles.create(n);
+  PINFO = r.info; $('profilename').value = ''; renderProfileList();
+  flash($('profilemsg'), `${n} created · click Open to start it`);
+});
+
+// -------------------------------------------------------------------- updates
+function renderUpdate(u) {
+  const st = $('updstate');
+  const txt = {
+    idle: `You have Goat ${u.current || ''}.`,
+    checking: 'Checking for updates…',
+    latest: `You're up to date (Goat ${u.current || u.version}).`,
+    available: `Goat ${u.version} is available (you have ${u.current}).`,
+    downloading: `Downloading Goat ${u.version}… ${u.progress || 0}%`,
+    ready: 'Starting the installer… click Update in its window.',
+    error: `Couldn't check: ${u.error}`,
+  }[u.state] || '';
+  st.textContent = txt;
+  st.className = u.state === 'available' ? 'good' : u.state === 'error' ? 'bad' : 'muted';
+  $('updinstall').hidden = !(u.state === 'available' || (u.state === 'error' && u.version && u.asset));
+  $('updinstall').textContent = u.platform === 'win32' && u.asset ? 'Download and install' : 'Open download page';
+  $('updcheck').disabled = u.state === 'checking' || u.state === 'downloading';
+  $('updbar').hidden = u.state !== 'downloading';
+  $('updfill').style.width = (u.progress || 0) + '%';
+}
+let UCUR = '';
+let UPLAT = '';
+if (api) api.updates.onStatus((u) => renderUpdate({ ...u, current: UCUR, platform: UPLAT }));
+$('updcheck').addEventListener('click', () => api.updates.check());
+$('updinstall').addEventListener('click', () => api.updates.install());
+
 // ----------------------------------------------------------------- profiles
 let PROFILES = {};
 function profileMatches(patch, cur) {
@@ -60,7 +134,7 @@ function currentProfile() {
   return 'custom';
 }
 function renderProfiles() {
-  const box = $('profiles');
+  const box = $('privprofiles');
   if (!box || !S) return;
   const cur = currentProfile();
   box.textContent = '';
@@ -589,6 +663,8 @@ $('ed-delete').addEventListener('click', async () => {
   markNav();
   $('about-text').textContent = `Goat Browser ${info.version} · Chromium ${info.chrome}. Data folder: your Goat Browser profile in %APPDATA%.`;
   $('uninstallrow').hidden = !info.installed;
+  api.profiles.list().then((p) => { PINFO = p; renderProfileList(); });
+  api.updates.status().then((u) => { UCUR = u.current; UPLAT = u.platform; renderUpdate(u); if (u.state === 'idle') api.updates.check(); });
   $('uninstall').addEventListener('click', () => api.uninstall());
   if (location.hash) document.querySelector(location.hash)?.scrollIntoView();
   markNav();

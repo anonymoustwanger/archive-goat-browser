@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Goat Browser: private, fast, no Google</title>
+  <title>Goat Browser</title>
   <meta name="description" content="Goat Browser is a free, private Chromium browser for Windows and Linux with a built-in ad blocker, Tor, fingerprint protection, encrypted DNS and Chrome extensions.">
   <meta property="og:title" content="Goat Browser">
   <meta property="og:description" content="A private, fast browser. Ad blocker, Tor, fingerprint protection and Chrome extensions built in.">
-  <meta property="og:image" content="img/newtab.webp">
+  <meta property="og:image" content="https://goatbrowser.pages.dev/img/newtab.webp">
   <meta name="theme-color" content="#0a0a0a">
   <link rel="icon" href="favicon.png">
   <style>
@@ -122,7 +122,7 @@
       <div class="wrap">
         <img class="logo" src="img/logo.png" alt="Goat Browser logo" width="60" height="60">
         <h1>Browse private. <span>Browse fast.</span></h1>
-        <p class="lead">A free Chromium browser with an ad blocker, Tor, fingerprint protection and encrypted DNS built in. No account, no sync, no telemetry.</p>
+        <p class="lead">A free browser that blocks ads and trackers, and keeps what you do to yourself.</p>
         <div class="cta">
           <a class="btn primary" href="https://github.com/anonymoustwanger/goat-browser/releases/latest">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></svg>
@@ -130,10 +130,10 @@
           </a>
           <a class="btn" href="https://github.com/anonymoustwanger/goat-browser/releases/latest">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a3.5 3.5 0 0 0-3.5 3.5v3.2c0 1-.6 2-1.4 3.1C5.9 14.5 5 16 5 17.5c0 .8.4 1.3 1 1.5M12 3a3.5 3.5 0 0 1 3.5 3.5v3.2c0 1 .6 2 1.4 3.1 1.2 1.7 2.1 3.2 2.1 4.7 0 .8-.4 1.3-1 1.5M8 21c1.2-.6 2.5-1 4-1s2.8.4 4 1"/><circle cx="10.5" cy="7.5" r=".6" fill="currentColor"/><circle cx="13.5" cy="7.5" r=".6" fill="currentColor"/></svg>
-            Linux (AppImage)
+            Download for Linux
           </a>
         </div>
-        <p class="meta">Windows 10/11 or Linux · 64-bit · Free</p>
+        <p class="meta">Free for Windows and Linux</p>
         <div class="shot">
           <img src="img/newtab-sm.webp" srcset="img/newtab-sm.webp 960w, img/newtab.webp 1920w" sizes="(max-width: 860px) 100vw, 820px" width="960" height="540" alt="Goat Browser's new tab page with bookmarks, dark theme">
         </div>
@@ -142,36 +142,35 @@
 
     <section id="features">
       <div class="wrap">
-        <h2>Built in</h2>
+        <h2>What you get</h2>
         <div class="grid">
-          <div class="card"><h3>Ad and tracker blocker</h3><p>Ads, trackers and cookie banners gone. Three levels and a per-site switch.</p></div>
-          <div class="card"><h3>Tor, one click</h3><p>Hide your IP without Tor Browser. Nothing loads outside Tor while it connects. Tor windows too.</p></div>
-          <div class="card"><h3>Private windows</h3><p>Forget history, cookies and cache when closed. Extensions stay out.</p></div>
-          <div class="card"><h3>Fingerprint protection</h3><p>Sites can't identify you from your GPU, hardware or browser details.</p></div>
-          <div class="card"><h3>Encrypted DNS</h3><p>Quad9, Mullvad, Cloudflare, NextDNS or your own. Your ISP can't see lookups.</p></div>
-          <div class="card"><h3>Translation</h3><p>Translate pages in one click, and keep sites in your language over Tor.</p></div>
-          <div class="card"><h3>Chrome extensions</h3><p>From the Chrome Web Store, including password managers like Bitwarden and iCloud Passwords.</p></div>
-          <div class="card"><h3>Tab folders and themes</h3><p>Drop a tab on a tab to make a folder. Nine themes plus your own.</p></div>
-          <div class="card"><h3>Light on memory</h3><p>Idle tabs sleep and give memory back. Restored tabs load only when opened.</p></div>
+          <div class="card"><h3>No ads</h3><p>Ads, trackers and cookie pop-ups are blocked.</p></div>
+          <div class="card"><h3>Hide your location</h3><p>Turn on Tor with one click.</p></div>
+          <div class="card"><h3>Private windows</h3><p>Nothing is saved after you close them.</p></div>
+          <div class="card"><h3>Harder to track</h3><p>Websites can't recognize your computer.</p></div>
+          <div class="card"><h3>Profiles</h3><p>Keep work and personal separate.</p></div>
+          <div class="card"><h3>Translate pages</h3><p>Read any site in your language.</p></div>
+          <div class="card"><h3>Chrome extensions</h3><p>Use the extensions you already like.</p></div>
+          <div class="card"><h3>Folders and themes</h3><p>Group tabs and make it yours.</p></div>
+          <div class="card"><h3>Light and fast</h3><p>Unused tabs sleep to save memory.</p></div>
         </div>
-        <div class="profiles">One-click profiles: <b>Fastest</b> (like Chrome with an ad blocker), <b>Balanced</b> (default), or <b>Most private</b>. Always on: HTTPS-only, third-party cookies blocked, tracking tags stripped from links, Privacy Sandbox off.</div>
       </div>
     </section>
 
     <section id="faq">
       <div class="wrap">
         <h2>FAQ</h2>
-        <details><summary>Windows says "Windows protected your PC"</summary><p>New apps without a paid code-signing certificate get this warning. Click <b>More info</b>, then <b>Run anyway</b>.</p></details>
-        <details><summary>How do I run the Linux version?</summary><p>Download the <code>.AppImage</code>, right-click → Properties → allow executing (or <code>chmod +x</code>), then double-click it.</p></details>
-        <details><summary>Does Goat make me anonymous?</summary><p>It stops ads, trackers and fingerprinting. Sites still see your IP unless you turn on Tor or use a VPN.</p></details>
-        <details><summary>Where is my data?</summary><p>Only on your computer. No account, no sync. Updating keeps your tabs, cookies and settings.</p></details>
+        <details><summary>Windows says "Windows protected your PC"</summary><p>Windows shows this for new apps. Click <b>More info</b>, then <b>Run anyway</b>.</p></details>
+        <details><summary>How do I run it on Linux?</summary><p>Download it, right-click it, choose Properties, allow it to run as a program, then double-click it.</p></details>
+        <details><summary>Does Goat hide who I am?</summary><p>It stops ads and trackers. To also hide your location, turn on Tor in Goat or use a VPN.</p></details>
+        <details><summary>Where is my data?</summary><p>Only on your computer. There's no account to sign up for.</p></details>
       </div>
     </section>
   </main>
 
   <footer>
     <div class="wrap">
-      <span>Goat Browser · built on Chromium</span>
+      <span>Goat Browser</span>
       <span><a href="https://github.com/anonymoustwanger/goat-browser">GitHub</a> · <a href="https://github.com/anonymoustwanger/goat-browser/issues">Report a problem</a></span>
     </div>
   </footer>

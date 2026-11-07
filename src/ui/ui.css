@@ -346,3 +346,14 @@ browser-action-list::part(badge) { font-size: 9px; border-radius: 4px; padding: 
 .trbtn.error { color: var(--danger); }
 #torbtn.off { background: none; color: var(--muted); }
 #torbtn.off:hover { background: var(--bg-3); color: var(--text); }
+
+/* Profile chip (shows once you have more than one profile) */
+#profilebtn { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; flex: none; margin: 0 2px;
+  background: color-mix(in srgb, var(--pc, var(--accent)) 26%, transparent); color: var(--pc, var(--accent));
+  font-weight: 700; font-size: 12.5px; border: 1.5px solid color-mix(in srgb, var(--pc, var(--accent)) 60%, transparent); }
+#profilebtn[hidden] { display: none; }
+#profilebtn:hover { background: color-mix(in srgb, var(--pc, var(--accent)) 38%, transparent); }
+/* Update dot on the menu button */
+#settings { position: relative; }
+#settings.has-update::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 2px var(--nav-bg, var(--bg)); }

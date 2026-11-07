@@ -323,6 +323,17 @@ function renderNav() {
   }
 
   document.documentElement.dataset.window = state.windowMode || 'normal';
+  const pb = $('profilebtn');
+  const prof = state.profile;
+  pb.hidden = !(prof && prof.many);
+  if (!pb.hidden) {
+    pb.style.setProperty('--pc', prof.color);
+    $('profileinitial').textContent = (prof.name || '?').trim().charAt(0).toUpperCase();
+    pb.title = `Profile: ${prof.name}. Click to switch profiles.`;
+    pb.setAttribute('aria-label', pb.title);
+  }
+  $('settings').classList.toggle('has-update', !!state.updateReady);
+  $('settings').title = state.updateReady ? 'Menu · an update is available' : 'Menu';
   const tr = $('trbtn');
   const tri = t && t.translate;
   tr.hidden = !tri;
@@ -424,6 +435,7 @@ $('reload').addEventListener('click', () => {
   goat.send(t && t.loading ? 'stop' : 'reload');
 });
 $('torbtn').addEventListener('click', () => goat.send('tor-toggle'));
+$('profilebtn').addEventListener('click', () => goat.send('profile-menu'));
 $('torbtn').addEventListener('contextmenu', (e) => { e.preventDefault(); goat.send('tor-menu'); });
 $('trbtn').addEventListener('click', () => goat.send('translate'));
 $('trbtn').addEventListener('contextmenu', (e) => { e.preventDefault(); goat.send('translate-menu'); });

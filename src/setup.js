@@ -33,6 +33,10 @@ const DEFAULT_DIR = process.env.GOAT_SETUP_DIR || (process.platform === 'win32'
 // --goat-quit helper: if Goat is running, the single-instance lock fails and the running
 // Goat receives our argv (it saves and closes). Exit code tells the caller which happened.
 if (process.argv.includes('--goat-quit')) {
+  // A profile other than the default has its own lock in its own folder.
+  const pa = process.argv.find((x) => x.startsWith('--goat-profile='));
+  const pid = pa ? pa.split('=')[1] : '';
+  if (/^[a-z0-9-]{1,40}$/.test(pid) && pid !== 'default') app.setPath('userData', path.join(app.getPath('userData'), 'Profiles', pid));
   const got = app.requestSingleInstanceLock();
   app.exit(got ? 0 : 3);
 } else {

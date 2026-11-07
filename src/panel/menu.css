@@ -33,3 +33,5 @@
 
 .menu .tor i { color: #b57cf5; }
 .menu .tor:hover i { color: #d3b0ff; }
+.menu .upd { color: var(--accent); font-weight: 600; }
+.menu .upd i { color: var(--accent); }

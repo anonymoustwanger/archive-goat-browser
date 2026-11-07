@@ -54,6 +54,14 @@ if (host === 'history') {
     },
     clearBrowsingData: call('clear-data'),
     uninstall: call('uninstall'),
+    profiles: {
+      list: call('profiles'), create: call('profile-create'), update: call('profile-update'),
+      remove: call('profile-delete'), open: call('profile-open'), shortcut: call('profile-shortcut'),
+    },
+    updates: {
+      status: call('update-status'), check: call('update-check'), install: call('update-install'),
+      onStatus: (fn) => ipcRenderer.on('goat:update', (_e, u) => fn(u)),
+    },
     tasks: { list: call('tasks'), sleep: call('task-sleep'), close: call('task-close') },
     dns: { status: call('dns-status'), openCheck: call('dns-check') },
     tor: {

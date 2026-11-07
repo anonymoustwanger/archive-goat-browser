@@ -2,6 +2,7 @@
 const api = window.goatMenu;
 const ICONS = {
   plus: '<path d="M8 3v10M3 8h10"/>',
+  user: '<circle cx="8" cy="5.5" r="2.7"/><path d="M2.8 14c.6-2.8 2.7-4.3 5.2-4.3s4.6 1.5 5.2 4.3"/>',
   window: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12"/>',
   onion: '<circle cx="8" cy="9" r="5"/><circle cx="8" cy="9" r="3"/><path d="M8 4c0-1.2.6-2 1.6-2.4"/>',
   mask: '<path d="M1.5 6.5c2-1.4 4.2-1.6 6.5-.4 2.3-1.2 4.5-1 6.5.4-.2 2.6-1.6 4.4-3.6 4.4-1.3 0-2.2-.8-2.9-1.9-.7 1.1-1.6 1.9-2.9 1.9-2 0-3.4-1.8-3.6-4.4z"/>',
@@ -41,6 +42,9 @@ api.onState((s) => {
   bm.setAttribute('aria-checked', String(s.bookmarksBar));
   for (const b of document.querySelectorAll('[data-web]')) b.disabled = !s.isWeb;
   document.getElementById('ver').textContent = s.version ? `v${s.version}` : '';
+  document.getElementById('profname').textContent = s.profile || '';
+  document.getElementById('updateitem').hidden = !s.update;
+  document.getElementById('updatelabel').textContent = s.update ? `Update to Goat ${s.update}` : 'Update Goat';
   report();
 });
 function report() { api.size(document.getElementById('card').getBoundingClientRect().height + 24); }

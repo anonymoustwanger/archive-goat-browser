@@ -52,6 +52,13 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
   `proxyConfig()` returns the Tor SOCKS5 proxy whenever `settings.tor.enabled` (fail-closed while connecting).
   NEWNYM via ControlPort cookie auth. Download/verify not tested end to end (torproject.org blocked in the
   build sandbox); launch/bootstrap/NEWNYM tested with a Linux tor.
+- Profiles: `--goat-profile=<id>` (top of main.js, `PROFILE`, `ROOT_DIR`, `profileDir`). Non-default profiles set
+  userData to `ROOT_DIR\Profiles\<id>` before anything else, so each has its own lock/process/session. List in
+  `ROOT_DIR\profiles.json` (`loadProfiles`, 3 s cache). tor.exe shared in `ROOT_DIR\tor`. Private/Tor windows inherit
+  the profile arg. `deleteProfile` sends `--goat-quit` with the profile arg (setup.js helper honors it) then rm -rf.
+- Updates: `checkForUpdates` (GitHub releases/latest via `ses.fetch`, so Tor/proxy apply; `GOAT_UPDATE_URL`
+  overrides for tests), daily from the default profile only. Windows: `installUpdate` streams the
+  `GoatBrowserSetup*.exe` asset to %TEMP% and spawns it. Linux: opens the release page.
 - Window modes: `--goat-window=private|tor` (see `MODE`/`EPHEMERAL` at the top of main.js). `openWindow()`
   spawns a second Goat process; it sets Chromium's userData to `%TEMP%\goat-window-<mode>-<pid>` (single-instance
   lock is per userData), while `userDir()` stays the main profile for reads. All writes (settings, tabs, history,
@@ -67,6 +74,13 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
   (`forgetSiteIfClosed`, tracked by `tab.site`).
 - `src/fp-preload.js`: fingerprint shield (standard/strict) and passkey/WebAuthn gate (ask/allow/block)
   for http(s) frames.
+- VPN extensions: `wireExtensionProxy()` registers router handlers `goat.proxy.get/set/clear/authReply`; the preload
+  shim (patch-extensions) implements `chrome.proxy` on top and a `webRequest.onAuthRequired` that receives
+  `goat.proxyAuth` events. Main's `login` handler forwards proxy 407s to the owning extension
+  (`askExtensionForProxyLogin`). `extProxy` applies to `ses` only; Tor wins. Tested with a fake MV3 VPN
+  (fixed_servers + pac_script + auth) as user `tester` with sandbox on. Not tested with real Proton VPN.
+- Taskbar: `APP_ID` per profile (`app.setAppUserModelId`), `applyTaskbarIdentity()` sets relaunch command and a
+  colored overlay dot (`profileDot`) when more than one profile exists.
 - `scripts/patch-extensions.js`: idempotent string patches to `electron-chrome-extensions` (native
   messaging framing/UTF-8/Windows registry lookup for iCloud Passwords etc., chrome.privacy /
   declarativeContent / sidePanel stand-ins, toolbar right-click items, popup sizing). If the library is

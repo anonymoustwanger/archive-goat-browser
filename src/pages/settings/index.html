@@ -13,6 +13,7 @@
   <nav class="side">
     <div class="brand">goat<span>.</span> settings</div>
     <a href="#general">General</a>
+    <a href="#profiles">Profiles</a>
     <a href="#languages">Languages</a>
     <a href="#appearance">Appearance</a>
     <a href="#privacy">Privacy</a>
@@ -69,6 +70,19 @@
             <span class="dnsbtns"><button type="button" id="dnstest">Test again</button><button type="button" id="dnscheck" hidden>Open check page</button></span>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section id="profiles">
+      <h2>Profiles</h2>
+      <div class="card">
+        <p class="hint">Each profile has its own cookies, logins, history, bookmarks, extensions and settings, kept only on this computer. Use one for work and one for personal, for example. Each opens in its own window.</p>
+        <div id="profilelist" class="profilelist"></div>
+        <form class="inline" id="profileform">
+          <input id="profilename" placeholder="New profile name, e.g. Work" maxlength="40" spellcheck="false">
+          <button class="primary">Add profile</button>
+        </form>
+        <p class="saved" id="profilemsg"></p>
       </div>
     </section>
 
@@ -159,7 +173,7 @@
       <div class="card">
         <div class="row col">
           <span><b>Profile</b><small>Sets the speed-vs-privacy switches in one click: preloading, keeping sites separate, font blocking, fingerprint protection, ad blocking level and DNS. You can still change any of them below. <em class="restart" id="profrestart" hidden>Restart Goat to apply fully.</em></small></span>
-          <div class="profiles" id="profiles" role="radiogroup" aria-label="Settings profile"></div>
+          <div class="profiles" id="privprofiles" role="radiogroup" aria-label="Settings profile"></div>
         </div>
       </div>
       <div class="card">
@@ -378,6 +392,14 @@
     <section id="about">
       <h2>About</h2>
       <div class="card"><p class="hint" id="about-text"></p>
+        <div class="row">
+          <span><b>Updates</b><small id="updstate" class="muted">Checking…</small></span>
+          <span class="dnsbtns"><button type="button" id="updcheck">Check now</button><button type="button" class="primary" id="updinstall" hidden>Update</button></span>
+        </div>
+        <div class="progressbar" id="updbar" hidden><i id="updfill"></i></div>
+        <label class="row"><span><b>Check for updates automatically</b><small>Once a day, Goat asks GitHub whether a newer version exists. Nothing about you is sent.</small></span>
+          <input type="checkbox" class="toggle" data-key="updates.auto">
+        </label>
         <div class="row" id="uninstallrow" hidden>
           <span><b>Uninstall Goat Browser</b><small>Removes Goat from this computer. You can keep your profile (cookies, bookmarks, settings) for later.</small></span>
           <button class="danger" id="uninstall">Uninstall…</button>

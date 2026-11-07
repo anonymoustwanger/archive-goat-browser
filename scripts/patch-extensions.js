@@ -139,6 +139,17 @@ const mainEdits = [
       x: Math.floor(anchorRect.x),
       y: Math.floor(anchorRect.y + anchorRect.height)
     });`],
+  ['permissions: host pattern matching', `      const hasOrigins = permissions.origins ? permissions.origins.every((origin) => currentPermissions.origins.includes(origin)) : true;`, `      // goat: like Chrome, a granted pattern covers narrower ones ("https://*/" covers "https://account.proton.me/*").
+      const goatParse = (p) => { if (p === "<all_urls>") return { all: true }; const m = /^(\\*|[a-z-]+):\\/\\/([^/]*)(\\/.*)?$/i.exec(String(p)); return m ? { scheme: m[1].toLowerCase(), host: m[2].toLowerCase() } : null; };
+      const goatCovers = (g, r) => {
+        if (!g || !r) return false;
+        if (g.all) return true;
+        if (r.all) return false;
+        const schemeOk = g.scheme === r.scheme || (g.scheme === "*" && /^(https?|wss?)$/.test(r.scheme));
+        const hostOk = g.host === "*" || g.host === r.host || (g.host.startsWith("*.") && (r.host === g.host.slice(2) || r.host.endsWith(g.host.slice(1))));
+        return schemeOk && hostOk;
+      };
+      const hasOrigins = permissions.origins ? permissions.origins.every((origin) => currentPermissions.origins.includes(origin) || currentPermissions.origins.some((g) => goatCovers(goatParse(g), goatParse(origin)))) : true;`],
   ['popup sizing and position', "  setSize(rect) {\n    if (!this.browserWindow || !this.parent) return;\n    const width = Math.floor(\n      Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth))\n    );\n    const height = Math.floor(\n      Math.min(_PopupView.BOUNDS.maxHeight, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight))\n    );\n    const size = { width, height };\n    d(`setSize`, size);\n    this.emit(\"will-resize\", size);\n    this.browserWindow?.setBounds({\n      ...this.browserWindow.getBounds(),\n      ...size\n    });\n    this.emit(\"resized\");\n  }\n  updatePosition() {\n    if (!this.browserWindow || !this.parent) return;\n    const winBounds = this.parent.getBounds();\n    const winContentBounds = this.parent.getContentBounds();\n    const nativeTitlebarHeight = winBounds.height - winContentBounds.height;\n    const viewBounds = this.browserWindow.getBounds();\n    let x = winBounds.x + this.anchorRect.x + this.anchorRect.width - viewBounds.width;\n    let y = winBounds.y + nativeTitlebarHeight + this.anchorRect.y + this.anchorRect.height + _PopupView.POSITION_PADDING;\n    if (this.alignment?.includes(\"right\")) x = winBounds.x + this.anchorRect.x;\n    if (this.alignment?.includes(\"top\"))\n      y = winBounds.y + nativeTitlebarHeight - viewBounds.height + this.anchorRect.y - _PopupView.POSITION_PADDING;\n    x = Math.floor(x);\n    y = Math.floor(y);\n    const position = { x, y };\n    d(`updatePosition`, position);\n    this.emit(\"will-move\", position);\n    this.browserWindow.setBounds({\n      ...this.browserWindow.getBounds(),\n      ...position\n    });\n    this.emit(\"moved\");\n  }", "  setSize(rect) {\n    // goat: round up (rounding down made popups show scrollbars or cut off a pixel),\n    // keep the popup inside the window, and apply size + position in ONE setBounds\n    // so Windows doesn't paint a half-moved popup.\n    if (!this.browserWindow || !this.parent) return;\n    const content = this.parent.getContentBounds();\n    const maxH = Math.max(_PopupView.BOUNDS.minHeight, Math.min(_PopupView.BOUNDS.maxHeight, content.height - (this.anchorRect.y + this.anchorRect.height) - 12));\n    const width = Math.ceil(Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth)));\n    const height = Math.ceil(Math.min(maxH, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight)));\n    this.size = { width, height };\n    d(`setSize`, this.size);\n    this.emit(\"will-resize\", this.size);\n    this.applyBounds();\n    this.emit(\"resized\");\n  }\n  updatePosition() {\n    if (!this.browserWindow || !this.parent) return;\n    this.applyBounds();\n    this.emit(\"moved\");\n  }\n  applyBounds() {\n    if (!this.browserWindow || this.browserWindow.isDestroyed() || !this.parent) return;\n    const size = this.size || this.browserWindow.getBounds();\n    // Content bounds, not window bounds: correct for frameless/maximized windows\n    // (a maximized window's bounds include ~8 px of invisible border on Windows).\n    const content = this.parent.getContentBounds();\n    let x = content.x + this.anchorRect.x + this.anchorRect.width - size.width;\n    let y = content.y + this.anchorRect.y + this.anchorRect.height + _PopupView.POSITION_PADDING;\n    if (this.alignment?.includes(\"right\")) x = content.x + this.anchorRect.x;\n    if (this.alignment?.includes(\"top\")) y = content.y + this.anchorRect.y - size.height - _PopupView.POSITION_PADDING;\n    x = Math.round(Math.max(content.x + 4, Math.min(x, content.x + content.width - size.width - 4)));\n    y = Math.round(y);\n    const next = { x, y, width: size.width, height: size.height };\n    const cur = this.browserWindow.getBounds();\n    if (cur.x === next.x && cur.y === next.y && cur.width === next.width && cur.height === next.height) return;\n    this.emit(\"will-move\", { x, y });\n    this.browserWindow.setBounds(next);\n  }"],
 ];
 
@@ -206,6 +217,69 @@ const SHIMS = `
               getRules: (ids, cb) => { const f = typeof ids === "function" ? ids : cb; if (f) setTimeout(() => f([]), 0); },
               addListener() {}, removeListener() {}, hasListener: () => false,
             },
+          },
+        },
+        // chrome.proxy: handled by Goat's main process (session.setProxy).
+        proxy: {
+          shouldInject: () => goatHasPermission("proxy"),
+          factory: (base) => {
+            const onChange = new ExtensionEvent("goat.proxy.onChange");
+            return {
+              ...(base || {}),
+              settings: {
+                get: invokeExtension2("goat.proxy.get"),
+                set: invokeExtension2("goat.proxy.set"),
+                clear: invokeExtension2("goat.proxy.clear"),
+                onChange,
+              },
+              onProxyError: new ExtensionEvent("goat.proxy.onProxyError"),
+            };
+          },
+        },
+        // chrome.webRequest: Electron doesn't pass proxy logins to extensions, so Goat
+        // forwards them to onAuthRequired listeners (VPN extensions like Proton VPN need this).
+        webRequest: {
+          shouldInject: () => goatHasPermission("webRequest"),
+          factory: (base) => {
+            const names = ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"];
+            const api = { ...(base || {}) };
+            for (const n of names) if (!api[n]) api[n] = new GoatLocalEvent();
+            const authListeners = new Map();
+            let bridged = false;
+            const bridge = () => {
+              if (bridged) return;
+              bridged = true;
+              new ExtensionEvent("goat.proxyAuth").addListener(async (details) => {
+                const reply = invokeExtension2("goat.proxy.authReply");
+                let answered = false;
+                const send = (resp) => { if (answered) return; answered = true; reply(details.requestId, resp || {}); };
+                for (const [cb, extra] of authListeners) {
+                  try {
+                    if ((extra || []).includes("asyncBlocking")) { cb(details, send); }
+                    else { const r = await cb(details); if (r) { send(r); return; } }
+                  } catch (e) { console.error(e); }
+                }
+                setTimeout(() => send({}), 25000);
+              });
+            };
+            api.onAuthRequired = {
+              addListener(cb, _filter, extra) { authListeners.set(cb, extra || []); bridge(); },
+              removeListener(cb) { authListeners.delete(cb); },
+              hasListener(cb) { return authListeners.has(cb); },
+              hasListeners() { return authListeners.size > 0; },
+            };
+            api.handlerBehaviorChanged = (...a) => goatCallback(a, void 0);
+            if (!api.MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES) api.MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES = 20;
+            return api;
+          },
+        },
+        idle: {
+          shouldInject: () => goatHasPermission("idle"),
+          factory: (base) => base || {
+            queryState: (_s, ...a) => goatCallback(a, "active"),
+            setDetectionInterval: () => {},
+            getAutoLockDelay: (...a) => goatCallback(a, 0),
+            onStateChanged: new GoatLocalEvent(),
           },
         },
         sidePanel: {

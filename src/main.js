@@ -23,6 +23,57 @@ const { installChromeWebStore, uninstallExtension } = require('electron-chrome-w
 const { Tor } = require('./tor');
 const { Translator, LANGUAGES, acceptLanguage, sameLang } = require('./translate');
 
+// ------------------------------------------------------------------- profiles
+// Local profiles: each has its own cookies, history, bookmarks, extensions and settings,
+// in %APPDATA%\Goat Browser\Profiles\<id>, and runs as its own Goat process
+// (--goat-profile=<id>). The default profile is %APPDATA%\Goat Browser itself.
+const ROOT_DIR = app.getPath('userData');
+const PROFILE = (() => {
+  const a = process.argv.find((x) => x.startsWith('--goat-profile='));
+  const id = a ? a.split('=')[1] : '';
+  return /^[a-z0-9-]{1,40}$/.test(id) && id !== 'default' ? id : 'default';
+})();
+const profilesFile = () => path.join(ROOT_DIR, 'profiles.json');
+const profileDir = (id) => (id === 'default' ? ROOT_DIR : path.join(ROOT_DIR, 'Profiles', id));
+if (PROFILE !== 'default') {
+  fs.mkdirSync(profileDir(PROFILE), { recursive: true });
+  app.setPath('userData', profileDir(PROFILE));
+}
+// Each profile gets its own taskbar button on Windows (different AppUserModelID).
+const APP_ID = PROFILE === 'default' ? 'com.goat.browser' : `com.goat.browser.profile.${PROFILE}`;
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
+const PROFILE_COLORS = ['#5fd3b3', '#6ea8ff', '#ff9e6b', '#c39bff', '#ff7aa8', '#e8c15a', '#8fa394'];
+let profilesCache = null; let profilesCacheAt = 0;
+function loadProfiles() {
+  if (profilesCache && Date.now() - profilesCacheAt < 3000) return profilesCache.map((p) => ({ ...p }));
+  let list = [];
+  try { list = JSON.parse(fs.readFileSync(profilesFile(), 'utf8')).profiles || []; } catch { /* none yet */ }
+  list = list.filter((p) => p && /^[a-z0-9-]{1,40}$/.test(p.id) && p.id !== 'default')
+    .map((p) => ({ id: p.id, name: String(p.name || 'Profile').slice(0, 40), color: PROFILE_COLORS.includes(p.color) ? p.color : PROFILE_COLORS[1] }));
+  let def = { id: 'default', name: 'Personal', color: PROFILE_COLORS[0] };
+  try { const d = JSON.parse(fs.readFileSync(profilesFile(), 'utf8')).default; if (d) def = { ...def, name: String(d.name || def.name).slice(0, 40), color: PROFILE_COLORS.includes(d.color) ? d.color : def.color }; } catch { /* default */ }
+  profilesCache = [def, ...list]; profilesCacheAt = Date.now();
+  return profilesCache.map((p) => ({ ...p }));
+}
+function saveProfiles(list) {
+  const def = list.find((p) => p.id === 'default');
+  fs.mkdirSync(ROOT_DIR, { recursive: true });
+  fs.writeFileSync(profilesFile(), JSON.stringify({ default: { name: def.name, color: def.color }, profiles: list.filter((p) => p.id !== 'default') }, null, 2));
+  profilesCache = null;
+}
+const currentProfile = () => loadProfiles().find((p) => p.id === PROFILE) || { id: PROFILE, name: PROFILE, color: PROFILE_COLORS[1] };
+const profileArgs = (id = PROFILE) => (id === 'default' ? [] : [`--goat-profile=${id}`]);
+const devArgs = () => [...(process.defaultApp ? [app.getAppPath()] : []), ...(process.argv.includes('--no-sandbox') ? ['--no-sandbox'] : [])];
+function openProfile(id) {
+  if (id === PROFILE) { if (win) win.focus(); return; }
+  try {
+    const child = require('child_process').spawn(process.execPath, [...devArgs(), ...profileArgs(id)], { detached: true, stdio: 'ignore' });
+    windowProcs.add(child);
+    child.on('exit', () => windowProcs.delete(child));
+    child.unref();
+  } catch (err) { toast(`Couldn't open profile: ${err.message}`); }
+}
+
 // ---------------------------------------------------------------- window mode
 // Private and Tor windows run as their own Goat process with a throwaway Chromium
 // profile in %TEMP%. They read your settings, bookmarks and blocklists from the
@@ -53,9 +104,9 @@ function cleanStaleWindowProfiles() {
     if (!alive) fs.rm(path.join(app.getPath('temp'), n), { recursive: true, force: true }, () => {});
   }
 }
-const windowProcs = new Set(); // private/Tor windows we started (closed with us for updates)
+var windowProcs = new Set(); // private/Tor/profile windows we started (closed with us for updates)
 function openWindow(mode) {
-  const args = [...(process.defaultApp ? [process.argv[1]] : []), `--goat-window=${mode}`];
+  const args = [...devArgs(), ...profileArgs(), `--goat-window=${mode}`];
   try {
     const child = require('child_process').spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
     windowProcs.add(child);
@@ -138,7 +189,8 @@ const DEFAULT_SETTINGS = {
     blockThirdPartyFonts: false, // fonts from other servers (can break icons)
     forgetSites: [], // cookies + storage deleted when the site's last tab closes
   },
-  tor: { enabled: false, showButton: false }, // showButton: Tor on/off button in the toolbar
+  tor: { enabled: false, showButton: false },
+  updates: { auto: true, lastCheck: 0, skip: '' }, // auto: check GitHub for a new Goat once a day // showButton: Tor on/off button in the toolbar
   // sites: language websites are asked for (Accept-Language, navigator.language).
   // translateTo: language pages are translated into. engine: google | libre.
   languages: { sites: 'en', translateTo: 'en', offer: true, auto: false, engine: 'libre', libreUrl: 'https://libretranslate.com', libreKey: '' },
@@ -319,6 +371,8 @@ async function applySettings(patch) {
   settings.privacy.forgetSites = [...new Set((Array.isArray(settings.privacy.forgetSites) ? settings.privacy.forgetSites : []).map(normalizeSite).filter(Boolean))];
   settings.tor.enabled = MODE === 'tor' || !!settings.tor.enabled;
   settings.tor.showButton = !!settings.tor.showButton;
+  settings.updates.auto = settings.updates.auto !== false;
+  settings.updates.skip = String(settings.updates.skip || '').slice(0, 30);
   { const L = settings.languages;
     if (!LANGUAGES[L.sites]) L.sites = 'en';
     if (!LANGUAGES[L.translateTo]) L.translateTo = 'en';
@@ -749,11 +803,92 @@ function proxyConfig() {
 async function applyProxy() {
   const cfg = proxyConfig();
   const list = [...allSessions(), session.defaultSession];
-  await Promise.allSettled(list.map((s) => s.setProxy(cfg)));
+  // A VPN extension's proxy (chrome.proxy) applies to normal tabs only, like Chrome; Tor always wins.
+  const own = extProxy && !settings.tor.enabled ? extProxy.config : null;
+  await Promise.allSettled(list.map((s) => s.setProxy(own && s === ses ? own : cfg)));
   await Promise.allSettled(list.map((s) => s.closeAllConnections()));
 }
 
-app.on('login', (event, _wc, _details, authInfo, callback) => {
+// ------------------------------------------------------ chrome.proxy for extensions
+let extProxy = null; // { owner: extensionId, value: chrome.proxy value, config: Electron proxy config }
+let authSeq = 0;
+const pendingAuth = new Map(); // requestId -> callback(username, password)
+function chromeProxyToElectron(v) {
+  const mode = v && v.mode;
+  if (mode === 'direct') return { mode: 'direct' };
+  if (mode === 'system') return { mode: 'system' };
+  if (mode === 'auto_detect') return { mode: 'auto_detect' };
+  if (mode === 'pac_script' && v.pacScript) {
+    if (v.pacScript.data) return { mode: 'pac_script', pacScript: 'data:application/x-ns-proxy-autoconfig;base64,' + Buffer.from(String(v.pacScript.data), 'utf8').toString('base64') };
+    if (v.pacScript.url) return { mode: 'pac_script', pacScript: String(v.pacScript.url) };
+  }
+  if (mode === 'fixed_servers' && v.rules) {
+    const r = v.rules;
+    const one = (p) => (p && p.host ? `${p.scheme || 'http'}://${p.host}${p.port ? ':' + p.port : ''}` : '');
+    let rules = '';
+    if (r.singleProxy) rules = one(r.singleProxy);
+    else rules = [['http', r.proxyForHttp], ['https', r.proxyForHttps], ['ftp', r.proxyForFtp]].filter(([, x]) => x).map(([k, x]) => `${k}=${one(x)}`).join(';') + (r.fallbackProxy ? `;${one(r.fallbackProxy)}` : '');
+    return { mode: 'fixed_servers', proxyRules: rules, proxyBypassRules: (r.bypassList || []).join(',') };
+  }
+  return null;
+}
+function wireExtensionProxy() {
+  const handle = extensions.ctx.router.apiHandler();
+  const level = (extId) => (settings.tor.enabled ? 'not_controllable'
+    : !extProxy ? 'controllable_by_this_extension'
+      : extProxy.owner === extId ? 'controlled_by_this_extension' : 'controlled_by_other_extensions');
+  const current = (extId) => ({
+    levelOfControl: level(extId),
+    value: extProxy ? extProxy.value : (settings.proxy.mode === 'direct' ? { mode: 'direct' } : { mode: 'system' }),
+    incognitoSpecific: false,
+  });
+  const changed = () => { for (const e of extApi().getAllExtensions()) extensions.ctx.router.sendEvent(e.id, 'goat.proxy.onChange', current(e.id)); };
+  handle('goat.proxy.get', ({ extension }) => current(extension.id));
+  handle('goat.proxy.set', async ({ extension }, details) => {
+    if (settings.tor.enabled) return undefined; // Tor is in charge
+    const config = chromeProxyToElectron(details && details.value);
+    if (!config) return undefined;
+    extProxy = { owner: extension.id, value: details.value, config };
+    await applyProxy();
+    changed();
+    toast(`${extText(extension, extension.name)} is now handling your connection`);
+    return undefined;
+  });
+  handle('goat.proxy.clear', async ({ extension }) => {
+    if (extProxy && extProxy.owner === extension.id) { extProxy = null; await applyProxy(); changed(); }
+    return undefined;
+  });
+  handle('goat.proxy.authReply', ({ extension }, requestId, resp) => {
+    const cb = pendingAuth.get(requestId);
+    if (!cb || !extProxy || extProxy.owner !== extension.id) return undefined;
+    pendingAuth.delete(requestId);
+    const c = resp && resp.authCredentials;
+    if (c && c.username != null) cb(String(c.username), String(c.password || ''));
+    else cb();
+    return undefined;
+  });
+  extApi().on('extension-unloaded', (_e, ext) => { if (extProxy && extProxy.owner === ext.id) { extProxy = null; applyProxy(); } });
+}
+// The VPN extension's servers ask for a login: let the extension answer, as Chrome does.
+function askExtensionForProxyLogin(authInfo, url, callback) {
+  if (!extProxy || !extensions) return false;
+  const requestId = `goat-${++authSeq}`;
+  const timer = setTimeout(() => { if (pendingAuth.delete(requestId)) callback(); }, 25000);
+  pendingAuth.set(requestId, (u, p) => { clearTimeout(timer); if (u == null) callback(); else callback(u, p); });
+  extensions.ctx.router.sendEvent(extProxy.owner, 'goat.proxyAuth', {
+    requestId, url: url || '', method: 'GET', frameId: 0, parentFrameId: -1, tabId: -1, type: 'other', timeStamp: Date.now(),
+    isProxy: true, scheme: authInfo.scheme, realm: authInfo.realm, statusCode: 407, statusLine: 'HTTP/1.1 407 Proxy Authentication Required',
+    challenger: { host: authInfo.host, port: authInfo.port },
+  });
+  return true;
+}
+
+app.on('login', (event, _wc, details, authInfo, callback) => {
+  if (authInfo.isProxy && extProxy && !settings.tor.enabled) {
+    event.preventDefault();
+    if (!askExtensionForProxyLogin(authInfo, details && details.url, callback)) callback();
+    return;
+  }
   const p = settings && settings.proxy;
   if (authInfo.isProxy && p && p.mode === 'manual' && p.username) {
     event.preventDefault();
@@ -1445,6 +1580,8 @@ function pushState() {
     tor: settings.tor.enabled ? tor.state : 'off',
     torButton: settings.tor.showButton || settings.tor.enabled || MODE === 'tor',
     windowMode: MODE,
+    profile: { ...currentProfile(), many: loadProfiles().length > 1 },
+    updateReady: update.state === 'available' && settings.updates.skip !== update.version,
     bookmarksBar: !!settings.showBookmarksBar,
     pinnedExtensions: settings.extensions.pinned || [],
     bookmarks: bookmarks.items,
@@ -1575,6 +1712,193 @@ const fpSecret = require('crypto').randomBytes(16);
 function fpSeed(url) {
   const site = siteOf(url) || 'none';
   return require('crypto').createHmac('sha256', fpSecret).update(site).digest().readUInt32LE(0);
+}
+
+// ------------------------------------------------------- profiles (manager)
+function profilesInfo() {
+  return { current: PROFILE, list: loadProfiles(), colors: PROFILE_COLORS, canShortcut: process.platform === 'win32' };
+}
+function createProfile(name, color) {
+  const list = loadProfiles();
+  const base = String(name || '').trim().slice(0, 40) || 'Profile';
+  let id = base.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'profile';
+  if (id === 'default') id = 'profile';
+  let n = 2; const taken = new Set(list.map((p) => p.id)); const stem = id;
+  while (taken.has(id)) id = `${stem}-${n++}`;
+  list.push({ id, name: base, color: PROFILE_COLORS.includes(color) ? color : PROFILE_COLORS[list.length % PROFILE_COLORS.length] });
+  saveProfiles(list);
+  fs.mkdirSync(profileDir(id), { recursive: true });
+  // Start the new profile with this profile's look and privacy choices, but none of its data.
+  try {
+    const seed = JSON.parse(JSON.stringify(settings));
+    delete seed.stats; seed.extensions = { unpacked: [], hidden: [], pinned: null }; seed.adblock.allowlist = []; seed.privacy.forgetSites = [];
+    fs.writeFileSync(path.join(profileDir(id), 'settings.json'), JSON.stringify(seed, null, 2));
+  } catch { /* defaults then */ }
+  return id;
+}
+function updateProfile(id, patch) {
+  const list = loadProfiles();
+  const p = list.find((x) => x.id === id);
+  if (!p) return false;
+  if (patch.name != null) p.name = String(patch.name).trim().slice(0, 40) || p.name;
+  if (PROFILE_COLORS.includes(patch.color)) p.color = patch.color;
+  saveProfiles(list);
+  if (id === PROFILE) { scheduleState(); if (win) win.setTitle(windowTitle()); applyTaskbarIdentity(); }
+  return true;
+}
+async function deleteProfile(id) {
+  if (id === 'default' || id === PROFILE) return { ok: false, error: "This profile is open in this window. Open another profile to delete it." };
+  // Ask that profile to close if it's running (same single-instance trick as the installer).
+  await new Promise((resolve) => {
+    require('child_process').execFile(process.execPath, [...devArgs(), ...profileArgs(id), '--goat-quit'], { timeout: 15000, windowsHide: true }, () => resolve());
+  });
+  await new Promise((r) => setTimeout(r, 800));
+  try { fs.rmSync(profileDir(id), { recursive: true, force: true }); } catch (err) { return { ok: false, error: `Couldn't delete its files: ${err.message}` }; }
+  saveProfiles(loadProfiles().filter((p) => p.id !== id));
+  if (process.platform === 'win32') { try { fs.rmSync(path.join(app.getPath('desktop'), `Goat Browser - ${profileName(id)}.lnk`), { force: true }); } catch { /* none */ } }
+  scheduleState();
+  return { ok: true };
+}
+function profileName(id) { const p = loadProfiles().find((x) => x.id === id); return p ? p.name : id; }
+function profileShortcut(id) {
+  if (process.platform !== 'win32') return false;
+  const p = loadProfiles().find((x) => x.id === id);
+  if (!p) return false;
+  return shell.writeShortcutLink(path.join(app.getPath('desktop'), `Goat Browser - ${p.name.replace(/[\\/:*?"<>|]/g, '')}.lnk`), 'replace', {
+    target: process.execPath, args: profileArgs(id).join(' '), icon: process.execPath, iconIndex: 0, description: `Goat Browser (${p.name})`,
+    appUserModelId: id === 'default' ? 'com.goat.browser' : `com.goat.browser.profile.${id}`,
+  });
+}
+function profileMenu() {
+  const list = loadProfiles();
+  Menu.buildFromTemplate([
+    ...list.map((p) => ({ label: p.name + (p.id === PROFILE ? '  (this window)' : ''), type: 'radio', checked: p.id === PROFILE, click: () => openProfile(p.id) })),
+    { type: 'separator' },
+    { label: 'Add profile…', click: () => openInternal(SETTINGS_URL + '#profiles') },
+    { label: 'Manage profiles…', click: () => openInternal(SETTINGS_URL + '#profiles') },
+  ]).popup({ window: win });
+}
+// Taskbar: separate button per profile, pinning reopens the same profile, and a
+// small colored dot on the icon shows which profile a window belongs to.
+function applyTaskbarIdentity() {
+  if (!win || process.platform !== 'win32') return;
+  const p = currentProfile();
+  const many = loadProfiles().length > 1;
+  try {
+    win.setAppDetails({
+      appId: APP_ID, appIconPath: process.execPath, appIconIndex: 0,
+      relaunchCommand: `"${process.execPath}"${PROFILE === 'default' ? '' : ` --goat-profile=${PROFILE}`}`,
+      relaunchDisplayName: PROFILE === 'default' ? 'Goat Browser' : `Goat Browser (${p.name})`,
+    });
+  } catch { /* older Windows */ }
+  try { win.setOverlayIcon(many ? profileDot(p.color) : null, many ? `Profile: ${p.name}` : ''); } catch { /* ignore */ }
+}
+// 16x16 colored circle with a dark ring, drawn pixel by pixel (no image files needed).
+function profileDot(hex) {
+  const { nativeImage } = require('electron');
+  const n = parseInt(hex.slice(1), 16); const R = n >> 16; const G = (n >> 8) & 255; const B = n & 255;
+  const S = 16; const buf = Buffer.alloc(S * S * 4);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const d = Math.hypot(x + 0.5 - S / 2, y + 0.5 - S / 2);
+      const i = (y * S + x) * 4;
+      if (d <= 7.5) {
+        const ring = d > 5.8;
+        buf[i] = ring ? 16 : B; buf[i + 1] = ring ? 18 : G; buf[i + 2] = ring ? 20 : R; // BGRA
+        buf[i + 3] = d > 7 ? Math.round(255 * (7.5 - d) * 2) : 255;
+      }
+    }
+  }
+  return nativeImage.createFromBitmap(buf, { width: S, height: S });
+}
+function windowTitle() {
+  const base = { normal: 'Goat Browser', private: 'Goat Browser · Private window', tor: 'Goat Browser · Tor window' }[MODE];
+  return PROFILE === 'default' && loadProfiles().length === 1 ? base : `${base} · ${currentProfile().name}`;
+}
+
+// ------------------------------------------------------------------- updates
+// Checks GitHub Releases for a newer Goat. Windows: downloads the installer and runs it
+// (it updates in place and keeps your profile). Linux: opens the download page.
+const RELEASES_API = process.env.GOAT_UPDATE_URL || 'https://api.github.com/repos/anonymoustwanger/goat-browser/releases/latest';
+const RELEASES_PAGE = 'https://github.com/anonymoustwanger/goat-browser/releases/latest';
+const APP_VERSION = require(path.join(__dirname, '..', 'package.json')).version;
+let update = { state: 'idle', version: '', notes: '', url: '', asset: null, progress: 0, error: '', checkedAt: 0 };
+const newerThan = (a, b) => {
+  const x = String(a).replace(/^v/i, '').split(/[.-]/).map((n) => parseInt(n, 10) || 0);
+  const y = String(b).replace(/^v/i, '').split(/[.-]/).map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
+  return false;
+};
+function pushUpdate() {
+  scheduleState();
+  for (const wc of allWebContents.getAllWebContents()) {
+    if (!wc.isDestroyed() && wc.getURL().startsWith(SETTINGS_URL)) wc.send('goat:update', update);
+  }
+}
+async function checkForUpdates(manual = false) {
+  if (update.state === 'checking' || update.state === 'downloading') return update;
+  update = { ...update, state: 'checking', error: '' };
+  pushUpdate();
+  try {
+    const res = await ses.fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store', credentials: 'omit' });
+    if (res.status === 404) throw new Error('no releases published yet');
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+    const rel = await res.json();
+    const version = String(rel.tag_name || rel.name || '').replace(/^v/i, '');
+    const want = process.platform === 'win32' ? /GoatBrowserSetup.*\.exe$/i : /\.AppImage$/i;
+    const asset = (rel.assets || []).find((a) => want.test(a.name)) || null;
+    update.checkedAt = Date.now();
+    settings.updates.lastCheck = update.checkedAt;
+    saveSettings();
+    if (version && newerThan(version, APP_VERSION)) {
+      const isNew = update.version !== version;
+      update = { ...update, state: 'available', version, notes: String(rel.body || '').slice(0, 2000), url: rel.html_url || RELEASES_PAGE,
+        asset: asset ? { name: asset.name, url: asset.browser_download_url, size: asset.size } : null };
+      if (isNew && !manual && settings.updates.skip !== version) toast(`Goat ${version} is available. Menu → Update Goat.`);
+    } else update = { ...update, state: 'latest', version: version || APP_VERSION };
+  } catch (err) {
+    update = { ...update, state: 'error', error: String(err.message || err) };
+  }
+  pushUpdate();
+  return update;
+}
+async function installUpdate() {
+  if (update.state !== 'available' && update.state !== 'error') return update;
+  if (process.platform !== 'win32' || !update.asset) { createTab(update.url || RELEASES_PAGE); return update; }
+  const file = path.join(app.getPath('temp'), update.asset.name.replace(/[^\w.-]/g, '_'));
+  update = { ...update, state: 'downloading', progress: 0, error: '' };
+  pushUpdate();
+  try {
+    const res = await ses.fetch(update.asset.url, { credentials: 'omit' });
+    if (!res.ok || !res.body) throw new Error(`download failed (${res.status})`);
+    const total = Number(res.headers.get('content-length')) || update.asset.size || 0;
+    const out = fs.createWriteStream(file);
+    const reader = res.body.getReader();
+    let got = 0; let last = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r));
+      got += value.length;
+      if (total && Date.now() - last > 250) { last = Date.now(); update.progress = Math.round((got / total) * 100); pushUpdate(); }
+    }
+    await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())));
+    if (update.asset.size && fs.statSync(file).size !== update.asset.size) throw new Error('download was incomplete');
+    update = { ...update, state: 'ready', progress: 100 };
+    pushUpdate();
+    // The installer closes Goat itself when you click Update, then updates in place.
+    require('child_process').spawn(file, [], { detached: true, stdio: 'ignore' }).unref();
+  } catch (err) {
+    update = { ...update, state: 'error', error: String(err.message || err) };
+    pushUpdate();
+  }
+  return update;
+}
+function scheduleUpdateChecks() {
+  if (EPHEMERAL || PROFILE !== 'default') return; // one window checks, not every profile
+  const due = () => settings.updates.auto && Date.now() - (settings.updates.lastCheck || 0) > 20 * 60 * 60 * 1000;
+  setTimeout(() => { if (due()) checkForUpdates(false); }, 15000);
+  setInterval(() => { if (due()) checkForUpdates(false); }, 60 * 60 * 1000).unref();
 }
 
 // ---------------------------------------------------------------- translation
@@ -1987,6 +2311,8 @@ function pushAppMenu() {
     isWeb: /^https?:/.test(url),
     fullscreen,
     version: require(path.join(__dirname, "..", "package.json")).version,
+    profile: currentProfile().name,
+    update: update.state === 'available' ? update.version : '',
   });
 }
 function wireAppMenuIpc() {
@@ -2002,6 +2328,8 @@ function wireAppMenuIpc() {
       case 'newtab': createTab(null, { position: 'end' }); break;
       case 'private': createTab(null, { position: 'end', private: true }); break;
       case 'privatewindow': openWindow('private'); break;
+      case 'profiles': profileMenu(); break;
+      case 'update': openInternal(SETTINGS_URL + '#about'); break;
       case 'torwindow': openWindow('tor'); break;
       case 'history': openInternal(HISTORY_URL); break;
       case 'bookmarksbar': setBookmarksBar(!settings.showBookmarksBar); break;
@@ -2313,6 +2641,8 @@ function wireUiIpc() {
   ipcMain.on('stop', fromUi(() => activeWc()?.stop()));
   ipcMain.on('settings', fromUi(() => openInternal(SETTINGS_URL)));
   ipcMain.on('tor-settings', fromUi(() => openInternal(SETTINGS_URL + '#tor')));
+  ipcMain.on('profile-menu', fromUi(() => profileMenu()));
+  ipcMain.on('update-open', fromUi(() => openInternal(SETTINGS_URL + '#about')));
   ipcMain.on('tor-toggle', fromUi(() => {
     if (MODE === 'tor') { toast('This is a Tor window: it always uses Tor.'); return; }
     const on = !settings.tor.enabled;
@@ -2504,6 +2834,15 @@ function wirePagesIpc() {
     return true;
   }));
   ipcMain.handle('goat:tasks', fromPage('settings', () => taskList()));
+  ipcMain.handle('goat:profiles', fromPage('settings', () => profilesInfo()));
+  ipcMain.handle('goat:profile-create', fromPage('settings', (name, color) => { const id = createProfile(name, color); scheduleState(); applyTaskbarIdentity(); return { id, info: profilesInfo() }; }));
+  ipcMain.handle('goat:profile-update', fromPage('settings', (id, patch) => { updateProfile(String(id), patch || {}); return profilesInfo(); }));
+  ipcMain.handle('goat:profile-delete', fromPage('settings', async (id) => { const r = await deleteProfile(String(id)); applyTaskbarIdentity(); return { ...r, info: profilesInfo() }; }));
+  ipcMain.handle('goat:profile-open', fromPage('settings', (id) => { openProfile(String(id)); return true; }));
+  ipcMain.handle('goat:profile-shortcut', fromPage('settings', (id) => profileShortcut(String(id))));
+  ipcMain.handle('goat:update-status', fromPage('settings', () => ({ ...update, current: APP_VERSION, platform: process.platform })));
+  ipcMain.handle('goat:update-check', fromPage('settings', () => checkForUpdates(true)));
+  ipcMain.handle('goat:update-install', fromPage('settings', () => installUpdate()));
   ipcMain.handle('goat:uninstall', fromPage('settings', async () => {
     const r = await dialog.showMessageBox(win, {
       type: 'question', buttons: ['Cancel', 'Uninstall…'], defaultId: 0, cancelId: 0,
@@ -2578,6 +2917,7 @@ async function setupExtensions() {
       },
     });
     ElectronChromeExtensions.handleCRXProtocol(session.defaultSession); // toolbar icons
+    wireExtensionProxy();
     extensions.ctx.goatName = (e) => extText(e, e.name);
     // Right-click on a toolbar extension button: add pin/unpin and manage.
     extensions.on('goat-action-context-menu', ({ extension, append, appendSeparator }) => {
@@ -2739,11 +3079,12 @@ function layout() {
 function createWindow() {
   win = new BaseWindow({
     width: 1280, height: 840, minWidth: 520, minHeight: 320,
-    title: { normal: 'Goat Browser', private: 'Goat Browser · Private window', tor: 'Goat Browser · Tor window' }[MODE], backgroundColor: appearance().bg, icon: path.join(__dirname, 'icon.png'),
+    title: windowTitle(), backgroundColor: appearance().bg, icon: path.join(__dirname, 'icon.png'),
     // Hide the OS title bar; min/max/close are drawn over the right end of the tab strip.
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#00000000', symbolColor: appearance().text, height: CONTROLS_HEIGHT },
   });
+  applyTaskbarIdentity();
   ui = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'ui', 'preload.bundle.js'),
@@ -2797,7 +3138,7 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null);
     loadSettings();
     tor = new Tor({
-      dir: path.join(userDir(), 'tor'),
+      dir: path.join(ROOT_DIR, 'tor'), // tor.exe is shared by all profiles
       stateDir: EPHEMERAL ? path.join(app.getPath('userData'), 'tor-state') : path.join(userDir(), 'tor', 'state'),
       onChange: (st) => {
         if (st.state === 'starting') applyProxy();
@@ -2838,6 +3179,7 @@ if (!app.requestSingleInstanceLock()) {
     wireBookmarksIpc();
     createWindow();
     if (!EPHEMERAL) await setupExtensions(); // extensions never run in private/Tor windows
+    scheduleUpdateChecks();
 
     // Load blocklists before the first page so it loads protected.
     blockerPromise = reloadBlocker();
@@ -2879,7 +3221,7 @@ if (process.env.GOAT_TEST) {
     createTab, newGroupWith, setGroupCollapsed, addToGroup, removeFromGroup, applySettings, mergeTabs, moveGroup,
     togglePanel, hidePanel, panel: () => panel, addBookmark, bookmarks: () => bookmarks, toggleBookmarkForActive,
     sleepTab, discardTab, activateTab, pendingUrls, listExtensions, shield: () => shieldState, closeTabById: (id) => closeTab(id),
-    history: () => history, toggleAppMenu, translateTab, showOriginal, ui: () => ui, skipForExtension,
+    history: () => history, toggleAppMenu, translateTab, showOriginal, ui: () => ui, skipForExtension, createProfile, deleteProfile, openProfile, loadProfiles, checkForUpdates, update: () => update, appMenu: () => appMenu,
     groups, tabs, order: () => order, activeId: () => activeId, session: () => ses, pushState,
   };
 }
