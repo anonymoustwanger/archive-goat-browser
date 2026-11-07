@@ -1,0 +1,2241 @@
+'use strict';
+// Goat Browser — a private, fast browser built on Chromium (via Electron).
+// Cookies and site data persist in the profile; trackers, ads and third-party
+// cookies are blocked; DNS goes over HTTPS; http:// is upgraded; sites must ask
+// for devices. Settings: goat://settings (ad blocker, cookies, proxy, general).
+
+const {
+  app, BaseWindow, WebContentsView, session, ipcMain, Menu, dialog,
+  clipboard, protocol, net, safeStorage, nativeTheme, webContents: allWebContents,
+} = require('electron');
+const path = require('path');
+const fs = require('fs');
+const { pathToFileURL } = require('url');
+const { parse: parseDomain } = require('tldts');
+const { ElectronBlocker } = require('@ghostery/adblocker-electron');
+const { ElectronChromeExtensions } = require('electron-chrome-extensions');
+const { installChromeWebStore, uninstallExtension } = require('electron-chrome-web-store');
+
+// ------------------------------------------------------------------ constants
+const SCHEME = 'goat';
+const NEWTAB_URL = `${SCHEME}://newtab/`;
+const SETTINGS_URL = `${SCHEME}://settings/`;
+const PAGES_DIR = path.join(__dirname, 'pages');
+const TOOLBAR_HEIGHT = 82;
+const BOOKMARKS_BAR_HEIGHT = 32;
+const uiHeight = () => TOOLBAR_HEIGHT + (settings && settings.showBookmarksBar ? BOOKMARKS_BAR_HEIGHT : 0);
+const BLOCKLIST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Encrypted DNS providers (DNS over HTTPS). One provider at a time, so the
+// provider's own "am I using you?" check page gives a clear answer.
+const DNS_PROVIDERS = {
+  quad9: { name: 'Quad9', url: 'https://dns.quad9.net/dns-query', check: 'https://on.quad9.net/' },
+  mullvad: { name: 'Mullvad', url: 'https://dns.mullvad.net/dns-query', check: 'https://mullvad.net/en/check' },
+  mullvadAdblock: { name: 'Mullvad (blocks ads)', url: 'https://adblock.dns.mullvad.net/dns-query', check: 'https://mullvad.net/en/check' },
+  cloudflare: { name: 'Cloudflare', url: 'https://cloudflare-dns.com/dns-query', check: 'https://one.one.one.one/help/' },
+  google: { name: 'Google', url: 'https://dns.google/dns-query', check: null },
+  adguard: { name: 'AdGuard (blocks ads)', url: 'https://dns.adguard-dns.com/dns-query', check: 'https://adguard.com/en/test.html' },
+  nextdns: { name: 'NextDNS', url: null, check: 'https://test.nextdns.io/' },
+  custom: { name: 'Custom', url: null, check: null },
+};
+const SEARCH_ENGINES = {
+  duckduckgo: 'https://duckduckgo.com/?q=',
+  brave: 'https://search.brave.com/search?q=',
+  startpage: 'https://www.startpage.com/do/search?q=',
+  google: 'https://www.google.com/search?q=',
+  bing: 'https://www.bing.com/search?q=',
+};
+const BLOCK_LEVELS = {
+  ads: 'fromPrebuiltAdsOnly',
+  standard: 'fromPrebuiltAdsAndTracking',
+  strict: 'fromPrebuiltFull',
+};
+const THEMES = {
+  goat: { scheme: 'dark', bg: '#101214', text: '#e7e9ec', name: 'Goat' },
+  midnight: { scheme: 'dark', bg: '#101214', text: '#e7e9ec', name: 'Midnight' },
+  daylight: { scheme: 'light', bg: '#eef0f3', text: '#16191d', name: 'Daylight' },
+  forest: { scheme: 'dark', bg: '#0f1511', text: '#e4ece5', name: 'Forest' },
+  ocean: { scheme: 'dark', bg: '#0b1220', text: '#e3eaf5', name: 'Ocean' },
+  sunset: { scheme: 'dark', bg: '#1a1012', text: '#f3e6e3', name: 'Sunset' },
+  grape: { scheme: 'dark', bg: '#140f1c', text: '#ece6f5', name: 'Grape' },
+  mono: { scheme: 'dark', bg: '#0c0c0c', text: '#f2f2f2', name: 'Mono' },
+  paper: { scheme: 'light', bg: '#f4efe6', text: '#2a241c', name: 'Paper' },
+};
+const CONTROLS_HEIGHT = 38; // native min/max/close sit in the tab strip
+const GROUP_COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'];
+
+const DEFAULT_SETTINGS = {
+  searchEngine: 'duckduckgo',
+  restoreTabs: true,
+  privacy: { fingerprint: 'standard', stripTracking: true },
+  performance: { sleepAfterMin: 30 },
+  showBookmarksBar: true,
+  appearance: { theme: 'goat', motion: 'system', gradients: true, customThemes: [] },
+  stats: { blocked: 0 },
+  httpsOnly: true,
+  secureDns: true,
+  dns: { provider: 'quad9', nextdnsId: '', custom: '' },
+  adblock: { enabled: true, level: 'standard', allowlist: [], customRules: '' },
+  cookies: { blockThirdParty: true, clearOnExit: false },
+  extensions: { unpacked: [], hidden: [], pinned: null }, // pinned: ids shown in the toolbar
+  proxy: { mode: 'system', type: 'socks5', host: '', port: '', bypass: '<local>', pacUrl: '', username: '', password: '' },
+};
+
+// ------------------------------------------------------------ engine switches
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp');
+app.commandLine.appendSwitch('disable-breakpad');
+app.commandLine.appendSwitch('disable-domain-reliability');
+app.commandLine.appendSwitch('no-pings');
+app.commandLine.appendSwitch('enable-parallel-downloading');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
+app.commandLine.appendSwitch('disable-features', [
+  'AutofillServerCommunication', 'MediaRouter', 'OptimizationHints', 'Translate',
+  // Privacy Sandbox ad APIs: no interest groups, topics or attribution reports.
+  'BrowsingTopics', 'InterestGroupStorage', 'Fledge', 'AdInterestGroupAPI', 'PrivacySandboxAdsAPIs',
+  'AttributionReportingCrossAppWeb', 'ConversionMeasurement', 'SharedStorageAPI', 'FencedFrames',
+].join(','));
+
+const CHROME_MAJOR = process.versions.chrome.split('.')[0];
+const UA_PLATFORM = {
+  win32: 'Windows NT 10.0; Win64; x64',
+  darwin: 'Macintosh; Intel Mac OS X 10_15_7',
+}[process.platform] || 'X11; Linux x86_64';
+const USER_AGENT = `Mozilla/5.0 (${UA_PLATFORM}) AppleWebKit/537.36 ` +
+  `(KHTML, like Gecko) Chrome/${CHROME_MAJOR}.0.0.0 Safari/537.36`;
+app.userAgentFallback = USER_AGENT;
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: SCHEME, privileges: { standard: true, secure: true } },
+]);
+
+// ---------------------------------------------------------------------- state
+let win = null;
+let ui = null;
+let ses = null;
+let blocker = null;
+let blockerPromise = Promise.resolve();
+let extensions = null;
+let statsDirty = false;
+let panel = null;
+let panelOpen = false;
+let panelHiddenAt = 0;
+setInterval(() => { if (statsDirty) { statsDirty = false; saveSettings(); } }, 15000).unref();
+let blockerGen = 0;
+let shieldState = 'loading'; // loading | on | error | disabled
+let settings = null;
+const tabs = new Map(); // id -> { id, view, title, blocked, groupId }
+const groups = new Map(); // id -> { id, name, color, collapsed }
+let order = [];
+let activeId = null;
+let nextId = 1;
+let nextGroupId = 1;
+let fullscreen = false;
+let quitting = false;
+const allowHttp = new Set();
+const upgradedHosts = new Set();
+const permDecisions = new Map();
+
+const userDir = () => app.getPath('userData');
+const settingsFile = () => path.join(userDir(), 'settings.json');
+const sessionFile = () => path.join(userDir(), 'tabs.json');
+
+// ------------------------------------------------------------------- settings
+function merge(base, patch) {
+  const out = Array.isArray(base) ? [...base] : { ...base };
+  for (const [k, v] of Object.entries(patch || {})) {
+    out[k] = v && typeof v === 'object' && !Array.isArray(v) && base && typeof base[k] === 'object' && !Array.isArray(base[k])
+      ? merge(base[k], v) : v;
+  }
+  return out;
+}
+
+function loadSettings() {
+  let raw = {};
+  try { raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { /* first run */ }
+  settings = merge(DEFAULT_SETTINGS, raw);
+  // Older versions had a single on/off switch.
+  if (!raw.dns && raw.secureDns === false) settings.dns.provider = 'off';
+}
+
+let saveTimer = null;
+function saveSettings() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    fs.mkdirSync(userDir(), { recursive: true });
+    fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2));
+  }, 200);
+}
+
+function encryptSecret(s) {
+  if (!s) return '';
+  try { return safeStorage.isEncryptionAvailable() ? 'enc:' + safeStorage.encryptString(s).toString('base64') : s; }
+  catch { return s; }
+}
+function decryptSecret(s) {
+  if (!s || !s.startsWith('enc:')) return s || '';
+  try { return safeStorage.decryptString(Buffer.from(s.slice(4), 'base64')); } catch { return ''; }
+}
+
+function publicSettings() {
+  const s = JSON.parse(JSON.stringify(settings));
+  s.proxy.password = s.proxy.password ? '••••••••' : '';
+  return s;
+}
+
+async function applySettings(patch) {
+  const before = JSON.stringify(settings);
+  const p = JSON.parse(JSON.stringify(patch || {}));
+  if (p.proxy && 'password' in p.proxy) {
+    if (p.proxy.password === '••••••••') delete p.proxy.password;
+    else p.proxy.password = encryptSecret(p.proxy.password);
+  }
+  if (p.adblock && Array.isArray(p.adblock.allowlist)) {
+    p.adblock.allowlist = [...new Set(p.adblock.allowlist.map(normalizeSite).filter(Boolean))];
+  }
+  const old = settings;
+  settings = merge(settings, p);
+  if (!SEARCH_ENGINES[settings.searchEngine]) settings.searchEngine = 'duckduckgo';
+  if (!BLOCK_LEVELS[settings.adblock.level]) settings.adblock.level = 'standard';
+  settings.appearance.customThemes = sanitizeCustomThemes(settings.appearance.customThemes);
+  if (settings.appearance.theme !== 'system' && !themeInfo(settings.appearance.theme)) settings.appearance.theme = 'system';
+  settings.appearance.gradients = settings.appearance.gradients !== false;
+  if (!['off', 'standard', 'strict'].includes(settings.privacy.fingerprint)) settings.privacy.fingerprint = 'standard';
+  settings.privacy.stripTracking = settings.privacy.stripTracking !== false;
+  if (settings.dns.provider !== 'off' && !DNS_PROVIDERS[settings.dns.provider]) settings.dns.provider = 'quad9';
+  settings.dns.nextdnsId = String(settings.dns.nextdnsId || '').trim().replace(/[^a-z0-9]/gi, '').slice(0, 20);
+  settings.dns.custom = String(settings.dns.custom || '').trim().slice(0, 300);
+  settings.performance.sleepAfterMin = [0, 5, 15, 30, 60, 120].includes(Number(settings.performance.sleepAfterMin)) ? Number(settings.performance.sleepAfterMin) : 30;
+  if (!['system', 'on', 'off'].includes(settings.appearance.motion)) settings.appearance.motion = 'system';
+  if (JSON.stringify(settings) === before) return publicSettings();
+  saveSettings();
+
+  if (JSON.stringify(old.proxy) !== JSON.stringify(settings.proxy)) await applyProxy();
+  if (JSON.stringify(old.dns) !== JSON.stringify(settings.dns)) applyDns();
+  if (JSON.stringify(old.appearance) !== JSON.stringify(settings.appearance)) applyAppearance();
+  if (old.showBookmarksBar !== settings.showBookmarksBar) { layout(); scheduleState(); }
+  const ab = (o) => JSON.stringify({ e: o.adblock.enabled, l: o.adblock.level, r: o.adblock.customRules });
+  if (ab(old) !== ab(settings)) blockerPromise = reloadBlocker();
+  if (JSON.stringify(old.adblock.allowlist) !== JSON.stringify(settings.adblock.allowlist)) scheduleState();
+  return publicSettings();
+}
+
+function searchUrl(q) { return SEARCH_ENGINES[settings.searchEngine] + encodeURIComponent(q); }
+
+// -------------------------------------------------------------------- helpers
+function siteOf(url) {
+  try { const p = parseDomain(url); return p.domain || p.hostname || null; } catch { return null; }
+}
+function normalizeSite(s) {
+  const t = String(s || '').trim().toLowerCase();
+  if (!t) return null;
+  return siteOf(/^[a-z]+:\/\//.test(t) ? t : 'https://' + t);
+}
+function isLocalHost(host) {
+  return /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|::1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/i.test(host) ||
+    /\.(localhost|local|lan|home\.arpa|internal)$/i.test(host);
+}
+function deleteHeader(headers, name) {
+  for (const k of Object.keys(headers)) if (k.toLowerCase() === name) delete headers[k];
+}
+function topUrlFor(details) {
+  const wc = details.webContents;
+  try { return wc && !wc.isDestroyed() ? wc.getURL() : null; } catch { return null; }
+}
+function isThirdParty(details) {
+  if (details.resourceType === 'mainFrame') return false;
+  const top = topUrlFor(details);
+  if (!top || !/^https?:/.test(top)) return false;
+  const a = siteOf(details.url);
+  const b = siteOf(top);
+  return !!(a && b && a !== b);
+}
+function isAllowlisted(url) {
+  const s = siteOf(url);
+  return !!s && settings.adblock.allowlist.includes(s);
+}
+function originOf(url) { try { return new URL(url).origin; } catch { return String(url); } }
+function tabByWebContentsId(wcId) {
+  for (const t of tabs.values()) {
+    if (!t.view.webContents.isDestroyed() && t.view.webContents.id === wcId) return t;
+  }
+  return null;
+}
+function toUrl(text) {
+  const s = String(text || '').trim();
+  if (!s) return null;
+  if (/^(https?|goat|file|view-source|chrome-extension):/i.test(s) || /^about:blank$/i.test(s)) return s;
+  if (/\s/.test(s)) return searchUrl(s);
+  const host = s.split(/[/?#]/)[0].replace(/:\d+$/, '');
+  if (isLocalHost(host) || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return 'http://' + s;
+  if (/^[^.]+(\.[^.]+)*\.[a-z][a-z0-9-]{1,62}$/i.test(host)) return 'https://' + s;
+  return searchUrl(s);
+}
+const pendingUrls = new WeakMap(); // webContents -> URL not loaded yet (lazy restore)
+function displayUrl(wc) {
+  if (pendingUrls.has(wc)) return pendingUrls.get(wc);
+  const u = wc.getURL();
+  if (!u || u.startsWith(NEWTAB_URL)) return '';
+  if (u.startsWith(`${SCHEME}://error/`) || u.startsWith(`${SCHEME}://sleep/`)) {
+    try { return new URL(u).searchParams.get('u') || u; } catch { return u; }
+  }
+  return u;
+}
+function securityOf(url) {
+  if (!url) return 'internal';
+  if (url.startsWith('https:')) return 'secure';
+  if (url.startsWith('http:')) return 'insecure';
+  return 'internal';
+}
+
+// --------------------------------------------------------------- web requests
+// Tracking parameters removed from links you open (when enabled).
+const TRACKING_PARAMS = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id', 'utm_name', 'utm_reader',
+  'utm_brand', 'utm_social', 'utm_social-type', 'fbclid', 'gclid', 'gclsrc', 'dclid', 'gbraid', 'wbraid',
+  'msclkid', 'mc_cid', 'mc_eid', 'igshid', 'igsh', 'yclid', '_hsenc', '_hsmi', 'mkt_tok', 'oly_anon_id',
+  'oly_enc_id', 'vero_id', 'vero_conv', 'rb_clickid', 's_cid', 'ttclid', 'twclid', 'wickedid', 'srsltid',
+  'ref_src', 'ref_url', '_openstat', 'trk', 'trkCampaign', 'sc_cid', 'epik', 'li_fat_id', 'cmpid',
+]);
+const SITE_TRACKING_PARAMS = { 'youtube.com': ['si', 'pp'], 'youtu.be': ['si'], 'spotify.com': ['si'], 'twitter.com': ['s', 't'], 'x.com': ['s', 't'], 'amazon.com': ['pd_rd_r', 'pd_rd_w', 'pd_rd_wg', 'pf_rd_p', 'pf_rd_r', 'pd_rd_i', 'ref_', 'content-id'] };
+function cleanTrackingUrl(raw) {
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+  if (!u.search) return null;
+  const extra = SITE_TRACKING_PARAMS[siteOf(raw)] || [];
+  let changed = false;
+  for (const key of [...u.searchParams.keys()]) {
+    if (TRACKING_PARAMS.has(key) || TRACKING_PARAMS.has(key.toLowerCase()) || extra.includes(key)) { u.searchParams.delete(key); changed = true; }
+  }
+  return changed ? u.toString() : null;
+}
+
+function onBeforeRequest(details, callback) {
+  const { url } = details;
+  if (settings.privacy.stripTracking && details.resourceType === 'mainFrame' && /^https?:/.test(url)) {
+    const clean = cleanTrackingUrl(url);
+    if (clean) { callback({ redirectURL: clean }); return; }
+  }
+  if (settings.httpsOnly && details.resourceType === 'mainFrame' && url.startsWith('http://')) {
+    try {
+      const u = new URL(url);
+      if (!isLocalHost(u.hostname) && !allowHttp.has(u.hostname)) {
+        u.protocol = 'https:';
+        if (u.port === '80') u.port = '';
+        upgradedHosts.add(u.hostname);
+        callback({ redirectURL: u.toString() });
+        return;
+      }
+    } catch { /* fall through */ }
+  }
+  if (!blocker || !/^(https?|wss?):/.test(url)) { callback({}); return; }
+  const top = topUrlFor(details);
+  if (top && isAllowlisted(top)) { callback({}); return; }
+  blocker.onBeforeRequest(details, (res) => {
+    if (res && (res.cancel || res.redirectURL)) {
+      const t = tabByWebContentsId(details.webContentsId);
+      if (t) { t.blocked += 1; scheduleState(); }
+      settings.stats.blocked = (settings.stats.blocked || 0) + 1;
+      statsDirty = true;
+    }
+    callback(res || {});
+  });
+}
+
+function onBeforeSendHeaders(details, callback) {
+  const h = details.requestHeaders;
+  h['Sec-GPC'] = '1';
+  h['DNT'] = '1';
+  if (settings.privacy.fingerprint !== 'off') {
+    // Only low-entropy client hints leave the browser.
+    for (const k of Object.keys(h)) {
+      const lk = k.toLowerCase();
+      if (lk.startsWith('sec-ch-ua-') && !['sec-ch-ua-mobile', 'sec-ch-ua-platform'].includes(lk)) delete h[k];
+      if (lk === 'sec-ch-device-memory' || lk === 'device-memory' || lk === 'sec-ch-dpr' || lk === 'dpr' || lk === 'sec-ch-viewport-width' || lk === 'viewport-width') delete h[k];
+    }
+  }
+  if (settings.cookies.blockThirdParty && isThirdParty(details)) deleteHeader(h, 'cookie');
+  if (details.resourceType === 'mainFrame') {
+    const ref = Object.keys(h).find((k) => k.toLowerCase() === 'referer');
+    if (ref && siteOf(h[ref]) !== siteOf(details.url)) delete h[ref];
+  }
+  callback({ requestHeaders: h });
+}
+
+function onHeadersReceived(details, callback) {
+  const finish = (res) => {
+    let headers = res && res.responseHeaders;
+    let changed = !!headers;
+    if (!headers) headers = details.responseHeaders;
+    if (headers && settings.cookies.blockThirdParty && isThirdParty(details)) {
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === 'set-cookie') { delete headers[k]; changed = true; }
+      }
+    }
+    callback(changed ? { responseHeaders: headers } : {});
+  };
+  const top = topUrlFor(details);
+  if (blocker && /^https?:/.test(details.url) && !(top && isAllowlisted(top))) {
+    blocker.onHeadersReceived(details, finish);
+  } else finish({});
+}
+
+function attachRequestHandlers() {
+  const filter = { urls: ['<all_urls>'] };
+  ses.webRequest.onBeforeRequest(filter, onBeforeRequest);
+  ses.webRequest.onBeforeSendHeaders(filter, onBeforeSendHeaders);
+  ses.webRequest.onHeadersReceived(filter, onHeadersReceived);
+}
+
+// ---------------------------------------------------------------- ad blocker
+async function loadBlocker(level) {
+  const cacheDir = path.join(userDir(), 'blocklists');
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const cachePath = path.join(cacheDir, `${level}.bin`);
+  try {
+    if (Date.now() - fs.statSync(cachePath).mtimeMs > BLOCKLIST_MAX_AGE_MS) fs.rmSync(cachePath, { force: true });
+  } catch { /* no cache yet */ }
+  const load = ElectronBlocker[BLOCK_LEVELS[level]](
+    (url, opts) => net.fetch(url, opts),
+    { path: cachePath, read: fs.promises.readFile, write: fs.promises.writeFile },
+  );
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 25000));
+  return Promise.race([load, timeout]);
+}
+
+function disableBlocker() {
+  if (!blocker) return;
+  try { blocker.disableBlockingInSession(ses); } catch { /* already off */ }
+  blocker = null;
+  attachRequestHandlers();
+}
+
+let retryTimer = null;
+async function reloadBlocker() {
+  const gen = ++blockerGen;
+  clearTimeout(retryTimer);
+  disableBlocker();
+  if (!settings.adblock.enabled) { shieldState = 'disabled'; scheduleState(); return; }
+  shieldState = 'loading';
+  scheduleState();
+  try {
+    const b = await loadBlocker(settings.adblock.level);
+    if (gen !== blockerGen) return;
+    const rules = settings.adblock.customRules.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('!'));
+    if (rules.length) b.updateFromDiff({ added: rules });
+    blocker = b;
+    b.enableBlockingInSession(ses);
+    // Respect the allowlist for cosmetic filtering too.
+    ipcMain.removeHandler('@ghostery/adblocker/inject-cosmetic-filters');
+    ipcMain.handle('@ghostery/adblocker/inject-cosmetic-filters', (event, url, msg) => {
+      if (isAllowlisted(url)) return undefined;
+      return b.onInjectCosmeticFilters(event, url, msg);
+    });
+    attachRequestHandlers();
+    shieldState = 'on';
+  } catch (err) {
+    if (gen !== blockerGen) return;
+    shieldState = 'error';
+    toast('Ad blocker could not download its lists. Retrying in 60 s.');
+    retryTimer = setTimeout(reloadBlocker, 60000);
+  }
+  scheduleState();
+}
+
+function blockerStatus() {
+  return { state: shieldState, level: settings.adblock.level };
+}
+
+// ----------------------------------------------------------------- appearance
+const HEX = /^#[0-9a-f]{6}$/i;
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function rgbToHex(c) { return '#' + c.map((v) => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join(''); }
+function mix(a, b, t) { const x = hexToRgb(a); const y = hexToRgb(b); return rgbToHex(x.map((v, i) => v + (y[i] - v) * t)); }
+function luminance(h) {
+  const [r, g, b] = hexToRgb(h).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function sanitizeCustomThemes(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const t of list.slice(0, 30)) {
+    if (!t || typeof t !== 'object' || !/^custom-[a-z0-9]{1,16}$/.test(t.id)) continue;
+    const c = t.colors || {};
+    const keys = ['bg', 'surface', 'text', 'accent', 'accent2'];
+    if (!keys.every((k) => HEX.test(c[k] || ''))) continue;
+    out.push({
+      id: t.id,
+      name: String(t.name || 'My theme').slice(0, 30),
+      colors: Object.fromEntries(keys.map((k) => [k, c[k].toLowerCase()])),
+    });
+  }
+  return out;
+}
+
+// Full set of CSS variables for a custom theme, derived from five colors.
+function customVars(c) {
+  const dark = luminance(c.bg) < 0.4;
+  return {
+    '--bg': c.bg, '--bg-2': c.surface, '--bg-3': mix(c.surface, c.text, 0.08), '--line': mix(c.surface, c.text, 0.15),
+    '--text': c.text, '--muted': mix(c.text, c.bg, 0.42), '--accent': c.accent, '--accent-2': c.accent2,
+    '--accent-ink': luminance(c.accent) > 0.4 ? '#0b0d10' : '#ffffff',
+    '--warn': dark ? '#f0b35a' : '#a35f00', '--danger': dark ? '#ff7a66' : '#c93a2b',
+    'color-scheme': dark ? 'dark' : 'light',
+  };
+}
+
+function themeInfo(id) {
+  if (THEMES[id]) return THEMES[id];
+  const t = settings && settings.appearance.customThemes.find((x) => x.id === id);
+  if (!t) return null;
+  return { scheme: luminance(t.colors.bg) < 0.4 ? 'dark' : 'light', bg: t.colors.bg, text: t.colors.text, name: t.name, custom: t };
+}
+
+function appearance() {
+  const t = settings.appearance.theme;
+  const id = t === 'system' || !themeInfo(t) ? (nativeTheme.shouldUseDarkColors ? 'goat' : 'daylight') : t;
+  const info = themeInfo(id);
+  return {
+    theme: info.custom ? 'custom' : id,
+    motion: settings.appearance.motion,
+    gradients: settings.appearance.gradients,
+    scheme: info.scheme,
+    vars: info.custom ? customVars(info.custom.colors) : null,
+    bg: info.bg,
+    text: info.text,
+  };
+}
+
+function applyAppearance() {
+  const t = settings.appearance.theme;
+  const info = themeInfo(t);
+  nativeTheme.themeSource = t === 'system' || !info ? 'system' : info.scheme;
+  const a = appearance();
+  if (win) {
+    win.setBackgroundColor(a.bg);
+    try { win.setTitleBarOverlay({ color: '#00000000', symbolColor: a.text, height: CONTROLS_HEIGHT }); } catch { /* macOS */ }
+  }
+  if (ui && !ui.webContents.isDestroyed()) { ui.setBackgroundColor(a.bg); ui.webContents.send('appearance', a); }
+  if (panel && !panel.webContents.isDestroyed()) panel.webContents.send('appearance', a);
+  for (const tab of tabs.values()) {
+    const wc = tab.view.webContents;
+    if (!wc.isDestroyed() && wc.getURL().startsWith(`${SCHEME}://`)) { wc.send('goat:appearance', a); tab.view.setBackgroundColor(a.bg); }
+  }
+}
+
+nativeTheme.on('updated', () => { if (settings && settings.appearance.theme === 'system') applyAppearance(); });
+
+// ---------------------------------------------------------------- DNS & proxy
+function dohServer() {
+  const d = settings.dns;
+  if (d.provider === 'off') return null;
+  if (d.provider === 'nextdns') return d.nextdnsId ? `https://dns.nextdns.io/${d.nextdnsId}` : 'https://dns.nextdns.io/';
+  if (d.provider === 'custom') return /^https:\/\/[^\s/]+\.[^\s]+/.test(d.custom) ? d.custom : DNS_PROVIDERS.quad9.url;
+  return DNS_PROVIDERS[d.provider].url;
+}
+
+async function dnsStatus() {
+  const server = dohServer();
+  const out = { server, provider: settings.dns.provider, check: (DNS_PROVIDERS[settings.dns.provider] || {}).check || null };
+  try { out.proxy = await ses.resolveProxy('https://example.com/'); } catch { out.proxy = 'DIRECT'; }
+  const t0 = Date.now();
+  try {
+    const r = await ses.resolveHost('example.com', { cacheUsage: 'disallowed', source: 'dns' });
+    out.ok = !!(r && r.endpoints && r.endpoints.length);
+    out.ms = Date.now() - t0;
+  } catch (err) { out.ok = false; out.error = String(err.message || err); }
+  return out;
+}
+function applyDns() {
+  const server = dohServer();
+  // The built-in resolver is off by default in Electron on Windows; Chrome uses
+  // it, and secure DNS is only reliable with it on.
+  app.configureHostResolver(server
+    ? { enableBuiltInResolver: true, secureDnsMode: 'secure', secureDnsServers: [server] }
+    : { enableBuiltInResolver: true, secureDnsMode: 'off' });
+  if (ses) { ses.clearHostResolverCache().catch(() => {}); ses.closeAllConnections().catch(() => {}); }
+}
+
+function proxyConfig() {
+  const p = settings.proxy;
+  if (p.mode === 'direct') return { mode: 'direct' };
+  if (p.mode === 'manual' && p.host && p.port) {
+    const scheme = ['http', 'https', 'socks4', 'socks5'].includes(p.type) ? p.type : 'http';
+    return { mode: 'fixed_servers', proxyRules: `${scheme}://${p.host}:${p.port}`, proxyBypassRules: p.bypass || '<local>' };
+  }
+  if (p.mode === 'pac' && p.pacUrl) return { mode: 'pac_script', pacScript: p.pacUrl };
+  return { mode: 'system' };
+}
+
+async function applyProxy() {
+  const cfg = proxyConfig();
+  await Promise.allSettled([ses.setProxy(cfg), session.defaultSession.setProxy(cfg)]);
+  await Promise.allSettled([ses.closeAllConnections(), session.defaultSession.closeAllConnections()]);
+}
+
+app.on('login', (event, _wc, _details, authInfo, callback) => {
+  const p = settings && settings.proxy;
+  if (authInfo.isProxy && p && p.mode === 'manual' && p.username) {
+    event.preventDefault();
+    callback(p.username, decryptSecret(p.password));
+  }
+});
+
+// ---------------------------------------------------------------- permissions
+const ALWAYS_ALLOW = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock']);
+const ASKABLE = new Set(['media', 'geolocation', 'notifications', 'display-capture',
+  'midi', 'midiSysex', 'idle-detection', 'window-management']);
+const PERM_LABEL = {
+  geolocation: 'location', notifications: 'notifications', 'display-capture': 'screen',
+  midi: 'MIDI devices', midiSysex: 'MIDI devices', 'idle-detection': 'idle detection',
+  'window-management': 'window placement',
+};
+
+function onPermissionRequest(wc, permission, callback, details) {
+  if (ALWAYS_ALLOW.has(permission)) { callback(true); return; }
+  if (!ASKABLE.has(permission)) { callback(false); return; }
+  const origin = originOf(details.requestingUrl || wc.getURL());
+  const key = `${origin}|${permission}|${(details.mediaTypes || []).join(',')}`;
+  if (permDecisions.has(key)) { callback(permDecisions.get(key)); return; }
+  let what = PERM_LABEL[permission] || permission;
+  if (permission === 'media') {
+    const m = details.mediaTypes || [];
+    what = m.includes('video') && m.includes('audio') ? 'camera and microphone'
+      : m.includes('video') ? 'camera' : 'microphone';
+  }
+  dialog.showMessageBox(win, {
+    type: 'question', buttons: ['Block', 'Allow'], defaultId: 0, cancelId: 0,
+    message: `${origin} wants to use your ${what}.`,
+    detail: 'This choice lasts until you close Goat Browser.',
+  }).then(({ response }) => {
+    const ok = response === 1;
+    permDecisions.set(key, ok);
+    callback(ok);
+  }).catch(() => callback(false));
+}
+
+function onPermissionCheck(_wc, permission, requestingOrigin) {
+  if (ALWAYS_ALLOW.has(permission)) return true;
+  const prefix = `${originOf(requestingOrigin)}|${permission}|`;
+  for (const [k, v] of permDecisions) if (k.startsWith(prefix) && v) return true;
+  return false;
+}
+
+// -------------------------------------------------------------------- session
+function setupSession() {
+  ses = session.fromPartition('persist:goat'); // cookies & site data survive restarts
+  ses.setUserAgent(USER_AGENT, 'en-US,en;q=0.9');
+  ses.setSpellCheckerEnabled(false);
+  ses.setPermissionRequestHandler(onPermissionRequest);
+  ses.setPermissionCheckHandler(onPermissionCheck);
+  ses.setDevicePermissionHandler(() => false);
+  ses.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'pages-preload.js') });
+  ses.registerPreloadScript({ type: 'frame', filePath: path.join(__dirname, 'fp-preload.js') });
+  attachRequestHandlers();
+
+  ses.protocol.handle(SCHEME, (req) => {
+    const u = new URL(req.url);
+    const rel = path.normalize(path.join(u.hostname, decodeURIComponent(u.pathname)));
+    let file = path.join(PAGES_DIR, rel);
+    if (!file.startsWith(PAGES_DIR + path.sep)) return new Response('Not found', { status: 404 });
+    if (u.pathname === '/' || u.pathname === '') file = path.join(file, 'index.html');
+    return net.fetch(pathToFileURL(file).toString());
+  });
+
+  ses.on('will-download', (_e, item) => {
+    item.once('done', (_ev, state) => {
+      const name = item.getFilename();
+      toast(state === 'completed' ? `Downloaded ${name}` : `Download ${state}: ${name}`);
+    });
+  });
+}
+
+// ----------------------------------------------------------------------- tabs
+function createTab(url, { activate = true, groupId = null, position = 'afterActive', lazy = false } = {}) {
+  const id = nextId++;
+  const view = new WebContentsView({
+    webPreferences: {
+      session: ses, contextIsolation: true, sandbox: true, nodeIntegration: false,
+      spellcheck: false, safeDialogs: true, navigateOnDragDrop: true,
+    },
+  });
+  // Theme color for Goat's own pages avoids a white flash; web pages get white.
+  view.setBackgroundColor(url && /^https?:/i.test(url) ? '#ffffff' : appearance().bg);
+  const tab = { id, view, title: '', blocked: 0, groupId: groups.has(groupId) ? groupId : null, lastActive: Date.now() };
+  tabs.set(id, tab);
+
+  if (tab.groupId) {
+    insertInGroup(id, tab.groupId);
+    groups.get(tab.groupId).collapsed = false;
+  } else if (position === 'end') {
+    order.push(id);
+  } else {
+    // After the active tab, but never inside a group the tab doesn't belong to.
+    let i = order.indexOf(activeId);
+    const g = i >= 0 ? tabs.get(order[i]).groupId : null;
+    if (g) while (i + 1 < order.length && tabs.get(order[i + 1]).groupId === g) i++;
+    order.splice(i >= 0 ? i + 1 : order.length, 0, id);
+  }
+
+  view.setVisible(false);
+  win.contentView.addChildView(view);
+  const wc = view.webContents;
+  wc.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+  wireTab(tab);
+  if (extensions) extensions.addTab(wc, win);
+  // Restored background tabs load when first opened, so startup stays fast.
+  if (lazy && url && !activate) pendingUrls.set(wc, url);
+  else wc.loadURL(url || NEWTAB_URL);
+  if (activate) activateTab(id, !url);
+  else scheduleState();
+  saveTabsSoon();
+  return tab;
+}
+
+function insertInGroup(tabId, groupId) {
+  order = order.filter((x) => x !== tabId);
+  let last = -1;
+  order.forEach((x, i) => { if (tabs.get(x).groupId === groupId) last = i; });
+  if (last >= 0) order.splice(last + 1, 0, tabId);
+  else order.push(tabId);
+}
+
+function openInternal(url) {
+  for (const id of order) {
+    const wc = tabs.get(id).view.webContents;
+    if (wc.getURL().startsWith(url)) { activateTab(id); return; }
+  }
+  createTab(url);
+}
+
+function wireTab(tab) {
+  const wc = tab.view.webContents;
+
+  wc.setWindowOpenHandler(({ url, disposition }) => {
+    if (disposition === 'new-window') {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          autoHideMenuBar: true, width: 520, height: 680,
+          webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+        },
+      };
+    }
+    if (/^(https?|goat):/.test(url)) {
+      createTab(url, { activate: disposition !== 'background-tab', groupId: tab.groupId });
+    }
+    return { action: 'deny' };
+  });
+  wc.on('did-create-window', (child) => {
+    child.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+  });
+
+  wc.on('page-title-updated', (_e, title) => { tab.title = title; scheduleState(); });
+  wc.on('did-start-loading', scheduleState);
+  wc.on('did-stop-loading', () => { scheduleState(); saveTabsSoon(); });
+  wc.on('did-navigate', (_e, navUrl) => {
+    tab.title = '';
+    tab.view.setBackgroundColor(/^https?:/i.test(navUrl) ? '#ffffff' : appearance().bg);
+    scheduleState();
+  });
+  wc.on('did-navigate-in-page', scheduleState);
+  wc.on('did-start-navigation', (d) => {
+    if (d.isMainFrame && !d.isSameDocument) { tab.blocked = 0; scheduleState(); }
+  });
+
+  wc.on('will-navigate', (e) => {
+    const target = e.url;
+    if (!target.startsWith(`${SCHEME}:`)) return;
+    const current = wc.getURL();
+    if (target.startsWith(`${SCHEME}://allow-http/`) && current.startsWith(`${SCHEME}://error/`)) {
+      e.preventDefault();
+      try {
+        const insecure = new URL(new URL(target).searchParams.get('u'));
+        insecure.protocol = 'http:';
+        allowHttp.add(insecure.hostname);
+        wc.loadURL(insecure.toString());
+      } catch { /* bad input */ }
+    } else if (!current.startsWith(`${SCHEME}://`)) {
+      e.preventDefault(); // websites may not open internal pages
+    }
+  });
+
+  wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (!isMainFrame || code === -3 || !url || url.startsWith(`${SCHEME}:`)) return;
+    showError(wc, url, code, desc);
+  });
+  wc.on('render-process-gone', (_e, details) => {
+    if (details.reason === 'clean-exit' || tab.discarded) return;
+    const url = displayUrl(wc) || NEWTAB_URL;
+    setImmediate(() => { if (!wc.isDestroyed()) showError(wc, url, 'crashed', details.reason); });
+  });
+
+  wc.on('before-input-event', handleShortcut);
+  wc.on('context-menu', (_e, p) => showContextMenu(wc, p));
+  wc.on('found-in-page', (_e, r) => {
+    if (tab.id === activeId) ui.webContents.send('find-result', { active: r.activeMatchOrdinal, total: r.matches });
+  });
+  wc.on('enter-html-full-screen', () => setFullscreen(true));
+  wc.on('leave-html-full-screen', () => setFullscreen(false));
+  wc.on('zoom-changed', (_e, dir) => zoom(dir === 'in' ? 0.5 : -0.5));
+}
+
+function showError(wc, url, code, desc) {
+  let host = '';
+  try { host = new URL(url).hostname; } catch { /* ignore */ }
+  const canHttp = url.startsWith('https:') && upgradedHosts.has(host) && !allowHttp.has(host);
+  const q = new URLSearchParams({ u: url, code: String(code), d: desc || '', http: canHttp ? '1' : '0' });
+  wc.loadURL(`${SCHEME}://error/?${q}`);
+}
+
+function activateTab(id, focusAddress = false) {
+  const t = tabs.get(id);
+  if (!t) return;
+  if (t.groupId && groups.get(t.groupId)?.collapsed) groups.get(t.groupId).collapsed = false;
+  const wc = t.view.webContents;
+  if (t.discarded) { t.discarded = false; wc.reload(); }
+  else if (pendingUrls.has(wc)) { const u = pendingUrls.get(wc); pendingUrls.delete(wc); wc.loadURL(u); }
+  else if (wc.getURL().startsWith(`${SCHEME}://sleep/`)) wakeTab(t);
+  const prev = tabs.get(activeId);
+  if (prev && prev.id !== id) {
+    prev.lastActive = Date.now();
+    // Background new-tab pages cost ~100 MB each and reload instantly, so drop them fast.
+    const prevWc = prev.view.webContents;
+    if (!prevWc.isDestroyed() && prevWc.getURL().startsWith(NEWTAB_URL)) {
+      setTimeout(() => { if (tabs.has(prev.id) && activeId !== prev.id) discardTab(prev); }, 5000);
+    }
+  }
+  t.lastActive = Date.now();
+  for (const other of tabs.values()) other.view.setVisible(other.id === id);
+  if (extensions) extensions.selectTab(t.view.webContents);
+  activeId = id;
+  layout();
+  if (focusAddress) { ui.webContents.focus(); ui.webContents.send('focus-address'); }
+  else t.view.webContents.focus();
+  ui.webContents.send('find-close');
+  pushPanel(true);
+  scheduleState();
+}
+
+function destroyTab(id) {
+  const t = tabs.get(id);
+  if (!t) return;
+  tabs.delete(id);
+  order = order.filter((x) => x !== id);
+  win.contentView.removeChildView(t.view);
+  try { extensions?.removeTab(t.view.webContents); } catch { /* not tracked */ }
+  if (!t.view.webContents.isDestroyed()) t.view.webContents.close();
+}
+
+function cleanupGroups() {
+  for (const gid of [...groups.keys()]) {
+    if (!order.some((id) => tabs.get(id).groupId === gid)) groups.delete(gid);
+  }
+}
+
+function visibleTabs() {
+  return order.filter((id) => {
+    const g = tabs.get(id).groupId;
+    return !(g && groups.get(g)?.collapsed);
+  });
+}
+
+function closeTabs(ids) {
+  const wasActive = ids.includes(activeId);
+  const idx = order.indexOf(activeId);
+  for (const id of ids) destroyTab(id);
+  cleanupGroups();
+  if (order.length === 0) { createTab(null); return; }
+  if (wasActive) {
+    const vis = visibleTabs();
+    const pick = vis.length ? vis[Math.min(idx, vis.length - 1)] : order[Math.min(idx, order.length - 1)];
+    activateTab(pick);
+  } else scheduleState();
+  saveTabsSoon();
+}
+const closeTab = (id) => { if (tabs.has(id)) closeTabs([id]); };
+
+function activeWc() {
+  const t = tabs.get(activeId);
+  return t ? t.view.webContents : null;
+}
+
+function navigate(text) {
+  const url = toUrl(text);
+  const wc = activeWc();
+  if (!url || !wc) return;
+  wc.loadURL(url);
+  wc.focus();
+}
+
+function reload(hard) {
+  const wc = activeWc();
+  if (!wc) return;
+  const cur = wc.getURL();
+  if (cur.startsWith(`${SCHEME}://error/`)) {
+    const u = displayUrl(wc);
+    if (u && u !== cur) { wc.loadURL(u); return; }
+  }
+  if (hard) wc.reloadIgnoringCache(); else wc.reload();
+}
+
+function zoom(delta) {
+  const wc = activeWc();
+  if (!wc) return;
+  wc.setZoomLevel(delta === 0 ? 0 : Math.max(-5, Math.min(5, wc.getZoomLevel() + delta)));
+}
+
+function cycleTab(step) {
+  const vis = visibleTabs();
+  if (vis.length < 2) return;
+  const i = vis.indexOf(activeId);
+  activateTab(vis[(i + step + vis.length) % vis.length]);
+}
+
+function setFullscreen(on) {
+  fullscreen = on;
+  win.setFullScreen(on);
+  layout();
+}
+
+async function clearBrowsingData() {
+  for (const id of [...order]) destroyTab(id);
+  groups.clear();
+  activeId = null;
+  allowHttp.clear();
+  upgradedHosts.clear();
+  permDecisions.clear();
+  await Promise.allSettled([
+    ses.clearStorageData(), ses.clearCache(), ses.clearAuthCache(),
+    ses.clearHostResolverCache(), ses.clearCodeCaches({}),
+  ]);
+  createTab(null);
+  saveTabsSoon();
+  toast('Browsing data cleared: cookies, cache, storage and tabs.');
+}
+
+// ----------------------------------------------------------------- tab groups
+function newGroupWith(tabIds) {
+  const id = nextGroupId++;
+  const used = new Set([...groups.values()].map((g) => g.color));
+  const color = GROUP_COLORS.find((c) => !used.has(c)) || GROUP_COLORS[id % GROUP_COLORS.length];
+  groups.set(id, { id, name: '', color, collapsed: false });
+  const first = Math.min(...tabIds.map((t) => order.indexOf(t)));
+  order = order.filter((x) => !tabIds.includes(x));
+  order.splice(Math.min(first, order.length), 0, ...tabIds);
+  for (const t of tabIds) tabs.get(t).groupId = id;
+  cleanupGroups();
+  scheduleState();
+  saveTabsSoon();
+  setTimeout(() => ui.webContents.send('rename-group', id), 60);
+  return id;
+}
+
+function addToGroup(tabId, groupId) {
+  const t = tabs.get(tabId);
+  if (!t || !groups.has(groupId)) return;
+  t.groupId = groupId;
+  insertInGroup(tabId, groupId);
+  groups.get(groupId).collapsed = false;
+  cleanupGroups();
+  scheduleState();
+  saveTabsSoon();
+}
+
+function removeFromGroup(tabId) {
+  const t = tabs.get(tabId);
+  if (!t || !t.groupId) return;
+  const gid = t.groupId;
+  let last = -1;
+  order.forEach((x, i) => { if (tabs.get(x).groupId === gid) last = i; });
+  order = order.filter((x) => x !== tabId);
+  order.splice(Math.min(last, order.length), 0, tabId);
+  t.groupId = null;
+  cleanupGroups();
+  scheduleState();
+  saveTabsSoon();
+}
+
+function setGroupCollapsed(gid, collapsed) {
+  const g = groups.get(gid);
+  if (!g) return;
+  g.collapsed = collapsed;
+  if (collapsed && tabs.get(activeId)?.groupId === gid) {
+    const outside = order.filter((id) => tabs.get(id).groupId !== gid && !groups.get(tabs.get(id).groupId)?.collapsed);
+    if (outside.length) activateTab(outside[0]);
+    else createTab(null, { position: 'end' });
+  }
+  scheduleState();
+  saveTabsSoon();
+}
+
+function moveTab(id, beforeId, groupId) {
+  const t = tabs.get(id);
+  if (!t || id === beforeId) return;
+  order = order.filter((x) => x !== id);
+  const i = beforeId != null ? order.indexOf(beforeId) : -1;
+  order.splice(i >= 0 ? i : order.length, 0, id);
+  t.groupId = groups.has(groupId) ? groupId : null;
+  // Keep groups contiguous: pull stray members next to each other.
+  for (const gid of groups.keys()) {
+    const members = order.filter((x) => tabs.get(x).groupId === gid);
+    if (!members.length) continue;
+    const at = order.indexOf(members[0]);
+    order = order.filter((x) => tabs.get(x).groupId !== gid);
+    order.splice(Math.min(at, order.length), 0, ...members);
+  }
+  cleanupGroups();
+  scheduleState();
+  saveTabsSoon();
+}
+
+// Drop one tab on another: join its folder, or make a new folder from both.
+function mergeTabs(dragId, targetId) {
+  const a = tabs.get(dragId);
+  const b = tabs.get(targetId);
+  if (!a || !b || dragId === targetId) return;
+  if (b.groupId) { addToGroup(dragId, b.groupId); return; }
+  order = order.filter((x) => x !== dragId);
+  order.splice(order.indexOf(targetId) + 1, 0, dragId);
+  a.groupId = null;
+  newGroupWith([targetId, dragId]);
+}
+
+function moveGroup(gid, beforeId) {
+  if (!groups.has(gid)) return;
+  const members = order.filter((x) => tabs.get(x).groupId === gid);
+  if (beforeId != null && members.includes(beforeId)) return;
+  order = order.filter((x) => tabs.get(x).groupId !== gid);
+  let i = beforeId != null ? order.indexOf(beforeId) : -1;
+  if (i >= 0) {
+    // Never split another folder: snap to its start.
+    const g = tabs.get(order[i]).groupId;
+    if (g) while (i > 0 && tabs.get(order[i - 1]).groupId === g) i--;
+  }
+  order.splice(i >= 0 ? i : order.length, 0, ...members);
+  scheduleState();
+  saveTabsSoon();
+}
+
+function groupMenu(gid) {
+  const g = groups.get(gid);
+  if (!g) return;
+  const ids = order.filter((id) => tabs.get(id).groupId === gid);
+  Menu.buildFromTemplate([
+    { label: 'New tab in group', click: () => createTab(null, { groupId: gid }) },
+    { label: 'Rename group', click: () => ui.webContents.send('rename-group', gid) },
+    {
+      label: 'Color',
+      submenu: GROUP_COLORS.map((c) => ({
+        label: c[0].toUpperCase() + c.slice(1), type: 'radio', checked: g.color === c,
+        click: () => { g.color = c; scheduleState(); saveTabsSoon(); },
+      })),
+    },
+    { label: g.collapsed ? 'Expand group' : 'Collapse group', click: () => setGroupCollapsed(gid, !g.collapsed) },
+    { type: 'separator' },
+    { label: 'Ungroup', click: () => { for (const id of ids) tabs.get(id).groupId = null; cleanupGroups(); scheduleState(); saveTabsSoon(); } },
+    { label: 'Close group', click: () => closeTabs(ids) },
+  ]).popup({ window: win });
+}
+
+function tabMenu(id) {
+  const t = tabs.get(id);
+  if (!t) return;
+  const wc = t.view.webContents;
+  const others = [...groups.values()].filter((g) => g.id !== t.groupId);
+  const items = [
+    { label: 'New tab to the right', click: () => { activateTab(id); createTab(null, { groupId: t.groupId }); } },
+    { type: 'separator' },
+    { label: 'Add to new group', click: () => newGroupWith([id]) },
+  ];
+  if (others.length) {
+    items.push({
+      label: 'Add to group',
+      submenu: others.map((g) => ({ label: g.name || `${g.color} group`, click: () => addToGroup(id, g.id) })),
+    });
+  }
+  if (t.groupId) items.push({ label: 'Remove from group', click: () => removeFromGroup(id) });
+  items.push(
+    { type: 'separator' },
+    { label: 'Reload', click: () => wc.reload() },
+    { label: 'Duplicate', click: () => { const u = wc.getURL(); activateTab(id); createTab(u, { groupId: t.groupId }); } },
+    { label: wc.isAudioMuted() ? 'Unmute site' : 'Mute site', click: () => { wc.setAudioMuted(!wc.isAudioMuted()); scheduleState(); } },
+    { type: 'separator' },
+    { label: 'Close tab', click: () => closeTab(id) },
+    { label: 'Close other tabs', enabled: order.length > 1, click: () => closeTabs(order.filter((x) => x !== id)) },
+    { label: 'Close tabs to the right', click: () => closeTabs(order.slice(order.indexOf(id) + 1)) },
+  );
+  Menu.buildFromTemplate(items).popup({ window: win });
+}
+
+// ------------------------------------------------------------- tabs on disk
+let tabsTimer = null;
+function saveTabsSoon() {
+  clearTimeout(tabsTimer);
+  tabsTimer = setTimeout(saveTabsNow, 500);
+}
+function saveTabsNow() {
+  if (!settings) return;
+  const data = {
+    groups: [...groups.values()],
+    tabs: order.map((id) => {
+      const t = tabs.get(id);
+      const url = t.view.webContents.isDestroyed() ? '' : displayUrl(t.view.webContents);
+      return { url, title: t.title, groupId: t.groupId, active: id === activeId };
+    }),
+  };
+  try { fs.writeFileSync(sessionFile(), JSON.stringify(data)); } catch { /* ignore */ }
+}
+function restoreTabs() {
+  if (!settings.restoreTabs) return false;
+  let data;
+  try { data = JSON.parse(fs.readFileSync(sessionFile(), 'utf8')); } catch { return false; }
+  if (!data.tabs || !data.tabs.length) return false;
+  const idMap = new Map();
+  for (const g of data.groups || []) {
+    const id = nextGroupId++;
+    idMap.set(g.id, id);
+    groups.set(id, { id, name: String(g.name || ''), color: GROUP_COLORS.includes(g.color) ? g.color : 'grey', collapsed: !!g.collapsed });
+  }
+  let activate = null;
+  for (const t of data.tabs) {
+    const tab = createTab(t.url || null, { activate: false, groupId: idMap.get(t.groupId) || null, position: 'end', lazy: !t.active });
+    if (t.groupId && idMap.has(t.groupId) && groups.get(idMap.get(t.groupId))) {
+      groups.get(idMap.get(t.groupId)).collapsed = !!(data.groups.find((g) => g.id === t.groupId) || {}).collapsed;
+    }
+    tab.title = t.title || '';
+    if (t.active) activate = tab.id;
+  }
+  cleanupGroups();
+  activateTab(activate || order[0]);
+  return true;
+}
+
+// ---------------------------------------------------------------------- input
+function handleShortcut(event, input) {
+  if (input.type !== 'keyDown') return;
+  const mod = process.platform === 'darwin' ? input.meta : input.control;
+  const k = input.key.toLowerCase();
+  let handled = true;
+  if (mod && !input.shift && k === 't') createTab(null, { position: 'end' });
+  else if (mod && k === 'w') closeTab(activeId);
+  else if ((mod && k === 'l') || (input.alt && k === 'd') || k === 'f6') {
+    ui.webContents.focus(); ui.webContents.send('focus-address');
+  } else if ((mod && k === 'r') || k === 'f5') reload(input.shift || (mod && k === 'f5'));
+  else if (mod && k === 'tab') cycleTab(input.shift ? -1 : 1);
+  else if (mod && /^[1-8]$/.test(k)) { const id = visibleTabs()[Number(k) - 1]; if (id) activateTab(id); }
+  else if (mod && k === '9') { const v = visibleTabs(); activateTab(v[v.length - 1]); }
+  else if (input.alt && k === 'arrowleft') activeWc()?.navigationHistory.goBack();
+  else if (input.alt && k === 'arrowright') activeWc()?.navigationHistory.goForward();
+  else if (mod && (k === '=' || k === '+')) zoom(0.5);
+  else if (mod && k === '-') zoom(-0.5);
+  else if (mod && k === '0') zoom(0);
+  else if (mod && k === 'f') { ui.webContents.focus(); ui.webContents.send('find-open'); }
+  else if (mod && k === ',') openInternal(SETTINGS_URL);
+  else if (mod && !input.shift && k === 'd') toggleBookmarkForActive();
+  else if (mod && input.shift && k === 'b') setBookmarksBar(!settings.showBookmarksBar);
+  else if (mod && input.shift && (k === 'delete' || k === 'backspace')) openInternal(SETTINGS_URL + '#data');
+  else if (k === 'f12' || (mod && input.shift && k === 'i')) activeWc()?.toggleDevTools();
+  else if (k === 'f11') setFullscreen(!fullscreen);
+  else handled = false;
+  if (handled) event.preventDefault();
+}
+
+function showContextMenu(wc, p) {
+  const items = [];
+  const sep = { type: 'separator' };
+  const groupId = tabByWebContentsId(wc.id)?.groupId || null;
+  if (p.linkURL) {
+    items.push(
+      { label: 'Open link in new tab', click: () => createTab(p.linkURL, { activate: false, groupId }) },
+      { label: 'Copy link', click: () => clipboard.writeText(p.linkURL) },
+      sep,
+    );
+  }
+  if (p.mediaType === 'image' && p.srcURL) {
+    items.push(
+      { label: 'Open image in new tab', click: () => createTab(p.srcURL, { activate: false, groupId }) },
+      { label: 'Copy image', click: () => wc.copyImageAt(p.x, p.y) },
+      { label: 'Save image as…', click: () => wc.downloadURL(p.srcURL) },
+      sep,
+    );
+  }
+  if (p.isEditable) {
+    items.push({ role: 'undo' }, { role: 'redo' }, sep, { role: 'cut' }, { role: 'copy' },
+      { role: 'paste' }, { role: 'selectAll' }, sep);
+  } else if (p.selectionText) {
+    const s = p.selectionText.trim();
+    const short = s.length > 24 ? s.slice(0, 24) + '…' : s;
+    items.push({ role: 'copy' }, { label: `Search for “${short}”`, click: () => createTab(searchUrl(s), { groupId }) }, sep);
+  }
+  items.push(
+    ...extensionMenuItems(wc, p),
+    { label: 'Back', enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() },
+    { label: 'Forward', enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() },
+    { label: 'Reload', click: () => wc.reload() },
+    sep,
+    { label: 'Inspect', click: () => wc.inspectElement(p.x, p.y) },
+  );
+  Menu.buildFromTemplate(items).popup({ window: win });
+}
+
+// ------------------------------------------------------------------ UI bridge
+let stateTimer = null;
+function scheduleState() {
+  if (stateTimer) return;
+  stateTimer = setTimeout(() => { stateTimer = null; pushState(); }, 40);
+}
+
+function pushState() {
+  pushPanel();
+  if (!ui || ui.webContents.isDestroyed()) return;
+  ui.webContents.send('state', {
+    activeId,
+    shield: shieldState,
+    bookmarksBar: !!settings.showBookmarksBar,
+    pinnedExtensions: settings.extensions.pinned || [],
+    bookmarks: bookmarks.items,
+    bookmarked: !!(activeWc() && findBookmarkByUrl(displayUrl(activeWc()))),
+    groups: [...groups.values()],
+    tabs: order.map((id) => {
+      const t = tabs.get(id);
+      const wc = t.view.webContents;
+      const url = displayUrl(wc);
+      return {
+        id,
+        groupId: t.groupId,
+        title: t.title || url || 'New tab',
+        url,
+        loading: wc.isLoading(),
+        canBack: wc.navigationHistory.canGoBack(),
+        canForward: wc.navigationHistory.canGoForward(),
+        blocked: t.blocked,
+        allowlisted: /^https?:/.test(url) && isAllowlisted(url),
+        asleep: !!t.discarded || pendingUrls.has(wc) || wc.getURL().startsWith(`${SCHEME}://sleep/`),
+        muted: wc.isAudioMuted(),
+        audible: wc.isCurrentlyAudible(),
+        security: securityOf(url),
+      };
+    }),
+  });
+}
+
+function toast(text) {
+  if (ui && !ui.webContents.isDestroyed()) ui.webContents.send('toast', text);
+}
+
+function fromUi(handler) {
+  return (event, ...args) => { if (ui && event.sender === ui.webContents) handler(...args); };
+}
+
+// --------------------------------------------------------------- memory saver
+// Background tabs idle longer than the limit swap to a tiny placeholder page,
+// freeing their memory. Opening the tab goes back to the page (from cache).
+// Discarding ends the tab's renderer process (like Chrome's tab discarding).
+// The tab keeps its title and history; opening it reloads the page.
+function discardTab(t) {
+  const wc = t.view.webContents;
+  if (wc.isDestroyed() || t.discarded || t.id === activeId || pendingUrls.has(wc)) return false;
+  if (wc.isLoading() || wc.isCurrentlyAudible() || wc.isDevToolsOpened()) return false;
+  const pid = wc.getOSProcessId();
+  if (!pid) return false;
+  // Never kill a process that another page, popup or extension also uses.
+  const shared = allWebContents.getAllWebContents().some((o) => o !== wc && !o.isDestroyed() && o.getOSProcessId() === pid);
+  if (shared) return false;
+  t.discarded = true;
+  wc.forcefullyCrashRenderer();
+  scheduleState();
+  return true;
+}
+
+function sleepTab(t) {
+  const wc = t.view.webContents;
+  const url = wc.getURL();
+  if (discardTab(t)) return;
+  if (!/^https?:/.test(url) || wc.isLoading() || wc.isCurrentlyAudible() || wc.isDevToolsOpened()) return;
+  const q = new URLSearchParams({ u: url, t: t.title || url });
+  t.sleptAt = Date.now();
+  wc.loadURL(`${SCHEME}://sleep/?${q}`);
+}
+function wakeTab(t) {
+  const wc = t.view.webContents;
+  const h = wc.navigationHistory;
+  if (h.canGoBack()) {
+    const sleepIndex = h.getActiveIndex();
+    wc.once('did-finish-load', () => { try { h.removeEntryAtIndex(sleepIndex); } catch { /* older Electron */ } });
+    h.goBack();
+  } else {
+    try { wc.loadURL(new URL(wc.getURL()).searchParams.get('u')); } catch { /* ignore */ }
+  }
+}
+setInterval(() => {
+  const mins = settings && settings.performance.sleepAfterMin;
+  if (!mins) return;
+  // When the PC is low on memory, sleep idle tabs much sooner.
+  const os = require('os');
+  const lowMemory = os.freemem() / os.totalmem() < 0.15;
+  const cutoff = Date.now() - (lowMemory ? Math.min(mins, 5) : mins) * 60000;
+  for (const t of tabs.values()) {
+    if (t.id === activeId || t.lastActive > cutoff) continue;
+    const wc = t.view.webContents;
+    if (wc.isDestroyed() || t.discarded || pendingUrls.has(wc) || wc.getURL().startsWith(`${SCHEME}://sleep/`)) continue;
+    if (wc.getURL().startsWith(`${SCHEME}://`)) discardTab(t); else sleepTab(t);
+  }
+  scheduleState();
+}, 60000).unref();
+
+// Memory per tab for Settings → Performance (task manager).
+function taskList() {
+  const metrics = new Map(app.getAppMetrics().map((m) => [m.pid, m]));
+  const usedPids = new Map();
+  for (const t of tabs.values()) {
+    const wc = t.view.webContents;
+    if (wc.isDestroyed()) continue;
+    const pid = wc.getOSProcessId();
+    usedPids.set(pid, (usedPids.get(pid) || 0) + 1);
+  }
+  const kb = (m) => (m && m.memory ? m.memory.workingSetSize : 0);
+  const rows = [];
+  let tabsKb = 0;
+  for (const id of order) {
+    const t = tabs.get(id);
+    const wc = t.view.webContents;
+    if (wc.isDestroyed()) continue;
+    const pid = wc.getOSProcessId();
+    const asleep = !!t.discarded || pendingUrls.has(wc) || wc.getURL().startsWith(`${SCHEME}://sleep/`);
+    const shared = (usedPids.get(pid) || 1) > 1;
+    const mem = t.discarded || pendingUrls.has(wc) ? 0 : kb(metrics.get(pid)) / (usedPids.get(pid) || 1);
+    tabsKb += mem;
+    rows.push({ id, title: t.title || displayUrl(wc) || 'New tab', url: displayUrl(wc), mb: Math.round(mem / 1024), asleep, shared, active: id === activeId });
+  }
+  let totalKb = 0;
+  for (const m of metrics.values()) totalKb += kb(m);
+  return { rows, totalMb: Math.round(totalKb / 1024), browserMb: Math.round((totalKb - tabsKb) / 1024) };
+}
+
+// -------------------------------------------------------- fingerprint shield
+// Per-session secret: fingerprint noise is stable on a site, different across
+// sites and after every restart.
+const fpSecret = require('crypto').randomBytes(16);
+function fpSeed(url) {
+  const site = siteOf(url) || 'none';
+  return require('crypto').createHmac('sha256', fpSecret).update(site).digest().readUInt32LE(0);
+}
+
+// ------------------------------------------------------------------ bookmarks
+// { items: [ { id, type: 'link', title, url } | { id, type: 'folder', title, children: [links] } ] }
+let bookmarks = { items: [] };
+const bookmarksFile = () => path.join(userDir(), 'bookmarks.json');
+let bmTimer = null;
+
+function loadBookmarks() {
+  try {
+    const data = JSON.parse(fs.readFileSync(bookmarksFile(), 'utf8'));
+    if (Array.isArray(data.items)) bookmarks = { items: data.items.filter(validBookmark) };
+  } catch { /* none yet */ }
+}
+function validBookmark(b) {
+  if (!b || typeof b.id !== 'string') return false;
+  if (b.type === 'folder') { b.children = (b.children || []).filter((c) => c && c.type === 'link' && validBookmark(c)); return true; }
+  return b.type === 'link' && typeof b.url === 'string';
+}
+function saveBookmarks() {
+  clearTimeout(bmTimer);
+  bmTimer = setTimeout(() => {
+    try { fs.writeFileSync(bookmarksFile(), JSON.stringify(bookmarks, null, 2)); } catch { /* ignore */ }
+  }, 200);
+  scheduleState();
+  // Refresh the bookmarks on any open new-tab pages.
+  for (const t of tabs.values()) {
+    const wc = t.view.webContents;
+    if (!wc.isDestroyed() && wc.getURL().startsWith(NEWTAB_URL)) wc.send('goat:bookmarks', bookmarks.items);
+  }
+}
+const newBmId = () => 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+function walkBookmarks(fn) {
+  for (const b of bookmarks.items) {
+    if (fn(b, bookmarks.items) === false) return;
+    if (b.type === 'folder') for (const c of b.children) if (fn(c, b.children) === false) return;
+  }
+}
+function findBookmark(id) {
+  let hit = null;
+  walkBookmarks((b, list) => { if (b.id === id) { hit = { b, list }; return false; } return true; });
+  return hit;
+}
+function findBookmarkByUrl(url) {
+  if (!url) return null;
+  let hit = null;
+  walkBookmarks((b, list) => { if (b.type === 'link' && b.url === url) { hit = { b, list }; return false; } return true; });
+  return hit;
+}
+
+function addBookmark(url, title, beforeId = null, folderId = null) {
+  if (!/^(https?|goat|chrome-extension|file):/i.test(url || '')) return null;
+  const item = { id: newBmId(), type: 'link', title: String(title || url).slice(0, 120), url };
+  const folder = folderId ? findBookmark(folderId) : null;
+  const list = folder && folder.b.type === 'folder' ? folder.b.children : bookmarks.items;
+  const i = beforeId ? list.findIndex((x) => x.id === beforeId) : -1;
+  list.splice(i >= 0 ? i : list.length, 0, item);
+  saveBookmarks();
+  return item;
+}
+
+function removeBookmark(id) {
+  const hit = findBookmark(id);
+  if (!hit) return;
+  hit.list.splice(hit.list.indexOf(hit.b), 1);
+  saveBookmarks();
+}
+
+function moveBookmark(id, beforeId, folderId) {
+  const hit = findBookmark(id);
+  if (!hit || id === beforeId || id === folderId) return;
+  if (hit.b.type === 'folder' && folderId) return; // one level of folders
+  hit.list.splice(hit.list.indexOf(hit.b), 1);
+  const folder = folderId ? findBookmark(folderId) : null;
+  const list = folder && folder.b.type === 'folder' ? folder.b.children : bookmarks.items;
+  const i = beforeId ? list.findIndex((x) => x.id === beforeId) : -1;
+  list.splice(i >= 0 ? i : list.length, 0, hit.b);
+  saveBookmarks();
+}
+
+function toggleBookmarkForActive() {
+  const t = tabs.get(activeId);
+  if (!t) return;
+  const url = displayUrl(t.view.webContents);
+  const hit = findBookmarkByUrl(url);
+  if (hit) { removeBookmark(hit.b.id); toast('Bookmark removed'); return; }
+  const item = addBookmark(url, t.title || url);
+  if (!item) { toast("This page can't be bookmarked"); return; }
+  if (!settings.showBookmarksBar) setBookmarksBar(true);
+  toast('Bookmarked. Right-click it on the bar to rename.');
+}
+
+function setBookmarksBar(show) {
+  applySettings({ showBookmarksBar: !!show });
+}
+
+function openBookmarkUrl(url, how) {
+  if (how === 'new' || how === 'background') {
+    const g = tabs.get(activeId)?.groupId || null;
+    createTab(url, { activate: how === 'new', groupId: null, position: 'end' });
+    return g;
+  }
+  activeWc()?.loadURL(url);
+  activeWc()?.focus();
+  return null;
+}
+
+function bookmarkFolderMenu(folderId, x, y) {
+  const hit = findBookmark(folderId);
+  if (!hit || hit.b.type !== 'folder') return;
+  const kids = hit.b.children;
+  const items = kids.length ? kids.map((c) => ({ label: c.title || c.url, click: () => openBookmarkUrl(c.url, 'current') })) : [{ label: '(empty)', enabled: false }];
+  if (kids.length) {
+    items.push({ type: 'separator' }, { label: `Open all (${kids.length}) in new tabs`, click: () => kids.forEach((c) => createTab(c.url, { activate: false, position: 'end' })) });
+  }
+  popupAt(Menu.buildFromTemplate(items), x, y);
+}
+
+function bookmarkOverflowMenu(ids, x, y) {
+  const items = [];
+  for (const id of ids) {
+    const hit = findBookmark(id);
+    if (!hit) continue;
+    const b = hit.b;
+    if (b.type === 'folder') {
+      items.push({ label: b.title || 'Folder', submenu: b.children.length ? b.children.map((c) => ({ label: c.title || c.url, click: () => openBookmarkUrl(c.url, 'current') })) : [{ label: '(empty)', enabled: false }] });
+    } else items.push({ label: b.title || b.url, click: () => openBookmarkUrl(b.url, 'current') });
+  }
+  if (items.length) popupAt(Menu.buildFromTemplate(items), x, y);
+}
+
+function bookmarkItemMenu(id, x, y) {
+  const hit = findBookmark(id);
+  if (!hit) return;
+  const b = hit.b;
+  const items = [];
+  if (b.type === 'link') {
+    items.push(
+      { label: 'Open', click: () => openBookmarkUrl(b.url, 'current') },
+      { label: 'Open in new tab', click: () => openBookmarkUrl(b.url, 'background') },
+      { label: 'Copy link', click: () => clipboard.writeText(b.url) },
+      { type: 'separator' },
+    );
+    const folders = bookmarks.items.filter((f) => f.type === 'folder' && !f.children.includes(b));
+    if (folders.length) items.push({ label: 'Move to folder', submenu: folders.map((f) => ({ label: f.title || 'Folder', click: () => moveBookmark(b.id, null, f.id) })) });
+    if (hit.list !== bookmarks.items) items.push({ label: 'Move to bar', click: () => moveBookmark(b.id, null, null) });
+  } else {
+    items.push({ label: `Open all (${b.children.length}) in new tabs`, enabled: b.children.length > 0, click: () => b.children.forEach((c) => createTab(c.url, { activate: false, position: 'end' })) }, { type: 'separator' });
+  }
+  items.push(
+    { label: 'Rename…', click: () => ui.webContents.send('bm-rename-start', b.id) },
+    { label: b.type === 'folder' ? 'Delete folder' : 'Delete', click: () => removeBookmark(b.id) },
+    { type: 'separator' },
+    ...barMenuItems(),
+  );
+  popupAt(Menu.buildFromTemplate(items), x, y);
+}
+
+function barMenuItems() {
+  return [
+    { label: 'Bookmark this page', accelerator: 'CmdOrCtrl+D', click: () => toggleBookmarkForActive() },
+    { label: 'New folder', click: () => { const f = { id: newBmId(), type: 'folder', title: 'New folder', children: [] }; bookmarks.items.push(f); saveBookmarks(); setTimeout(() => ui.webContents.send('bm-rename-start', f.id), 80); } },
+    { type: 'separator' },
+    { label: 'Show bookmarks bar', type: 'checkbox', checked: !!settings.showBookmarksBar, accelerator: 'CmdOrCtrl+Shift+B', click: () => setBookmarksBar(!settings.showBookmarksBar) },
+  ];
+}
+
+function popupAt(menu, x, y) {
+  const opts = { window: win };
+  if (Number.isFinite(x) && Number.isFinite(y)) { opts.x = Math.round(x); opts.y = Math.round(y); }
+  menu.popup(opts);
+}
+
+function wireBookmarksIpc() {
+  ipcMain.on('bm-open', fromUi((id, how) => {
+    const hit = findBookmark(id);
+    if (hit && hit.b.type === 'link') openBookmarkUrl(hit.b.url, how);
+  }));
+  ipcMain.on('bm-star', fromUi(() => toggleBookmarkForActive()));
+  ipcMain.on('bm-menu', fromUi((id, x, y) => bookmarkItemMenu(id, x, y)));
+  ipcMain.on('bm-bar-menu', fromUi((x, y) => popupAt(Menu.buildFromTemplate(barMenuItems()), x, y)));
+  ipcMain.on('bm-folder', fromUi((id, x, y) => bookmarkFolderMenu(id, x, y)));
+  ipcMain.on('bm-overflow', fromUi((ids, x, y) => bookmarkOverflowMenu(Array.isArray(ids) ? ids : [], x, y)));
+  ipcMain.on('bm-move', fromUi((id, beforeId, folderId) => moveBookmark(id, beforeId, folderId)));
+  ipcMain.on('bm-rename', fromUi((id, title) => {
+    const hit = findBookmark(id);
+    if (hit && String(title || '').trim()) { hit.b.title = String(title).trim().slice(0, 120); saveBookmarks(); }
+  }));
+  ipcMain.on('bm-add-tab', fromUi((tabId, beforeId, folderId) => {
+    const t = tabs.get(tabId);
+    if (!t) return;
+    const url = displayUrl(t.view.webContents);
+    if (!addBookmark(url, t.title || url, beforeId, folderId)) toast("This page can't be bookmarked");
+  }));
+}
+
+// ---------------------------------------------------------- extensions menu
+const EXTMENU_W = 320;
+let extMenu = null;
+let extMenuOpen = false;
+let extMenuHiddenAt = 0;
+let extMenuHeight = 300;
+let extMenuAnchor = null; // puzzle button rect in window coordinates
+
+function ensureExtMenu() {
+  if (extMenu && !extMenu.webContents.isDestroyed()) return extMenu;
+  extMenu = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'panel', 'ext-preload.js'),
+      contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false,
+    },
+  });
+  extMenu.setBackgroundColor('#00000000');
+  extMenu.setVisible(false);
+  const wc = extMenu.webContents;
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('will-navigate', (e) => e.preventDefault());
+  wc.on('blur', () => hideExtMenu());
+  wc.on('before-input-event', (e, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); hideExtMenu(); activeWc()?.focus(); }
+  });
+  wc.on('did-finish-load', () => { wc.send('appearance', appearance()); pushExtMenu(); });
+  wc.loadFile(path.join(__dirname, 'panel', 'extensions.html'));
+  win.contentView.addChildView(extMenu);
+  return extMenu;
+}
+function placeExtMenu() {
+  if (!extMenu || !win || !extMenuAnchor) return;
+  const { width } = win.getContentBounds();
+  const right = extMenuAnchor.x + extMenuAnchor.width;
+  const x = Math.max(8, Math.min(width - EXTMENU_W - 4, Math.round(right - EXTMENU_W + 12)));
+  extMenu.setBounds({ x, y: uiHeight() - 8, width: EXTMENU_W, height: extMenuHeight });
+}
+function toggleExtMenu(rect) {
+  if (extMenuOpen) { hideExtMenu(); return; }
+  if (Date.now() - extMenuHiddenAt < 300) return;
+  hidePanel();
+  extMenuAnchor = rect && Number.isFinite(rect.x) ? rect : { x: 0, y: 0, width: 0, height: 0 };
+  const v = ensureExtMenu();
+  win.contentView.addChildView(v);
+  placeExtMenu();
+  v.setVisible(true);
+  extMenuOpen = true;
+  pushExtMenu();
+  v.webContents.focus();
+  v.webContents.send('panel-open');
+}
+function hideExtMenu() {
+  if (!extMenu || !extMenuOpen) return;
+  extMenuOpen = false;
+  extMenuHiddenAt = Date.now();
+  extMenu.setVisible(false);
+}
+function pushExtMenu() {
+  if (!extMenu || extMenu.webContents.isDestroyed()) return;
+  let list = [];
+  try { list = extensions ? listExtensions() : []; } catch { /* not ready */ }
+  extMenu.webContents.send('ext-state', { list, ready: !!extensions });
+}
+function setExtensionPinned(id, pinned) {
+  const set = new Set(settings.extensions.pinned || []);
+  if (pinned) set.add(String(id)); else set.delete(String(id));
+  settings.extensions.pinned = [...set];
+  saveSettings();
+  scheduleState();
+  pushExtMenu();
+  for (const t of tabs.values()) {
+    const wc = t.view.webContents;
+    if (!wc.isDestroyed() && wc.getURL().startsWith(SETTINGS_URL)) wc.send('goat:extensions-changed');
+  }
+}
+
+function wireExtMenuIpc() {
+  const fromMenu = (fn) => (event, ...args) => { if (extMenu && event.sender === extMenu.webContents) return fn(...args); return undefined; };
+  ipcMain.on('ext-menu', fromUi((rect) => toggleExtMenu(rect)));
+  ipcMain.on('extmenu:size', fromMenu((h) => { extMenuHeight = Math.max(120, Math.min(560, Math.ceil(Number(h) || 300))); placeExtMenu(); }));
+  ipcMain.on('extmenu:close', fromMenu(() => { hideExtMenu(); activeWc()?.focus(); }));
+  ipcMain.on('extmenu:pin', fromMenu((id, pinned) => setExtensionPinned(id, pinned)));
+  ipcMain.on('extmenu:open', fromMenu((id) => {
+    hideExtMenu();
+    const wc = activeWc();
+    // The toolbar's preload asks the extension library to open the popup (or fire onClicked).
+    ui.webContents.send('ext-activate', String(id), wc ? wc.id : -1, extMenuAnchor);
+  }));
+  ipcMain.on('extmenu:options', fromMenu((id) => {
+    hideExtMenu();
+    const e = extApi().getExtension(String(id));
+    const m = (e && e.manifest) || {};
+    const page = (m.options_ui && m.options_ui.page) || m.options_page;
+    if (page) createTab(`chrome-extension://${e.id}/${String(page).replace(/^\//, '')}`);
+  }));
+  ipcMain.on('extmenu:manage', fromMenu(() => { hideExtMenu(); openInternal(SETTINGS_URL + '#extensions'); }));
+  ipcMain.on('extmenu:store', fromMenu(() => { hideExtMenu(); createTab('https://chromewebstore.google.com/category/extensions'); }));
+}
+
+// ------------------------------------------------------- ad blocker panel
+const PANEL_W = 344;
+let panelHeight = 420;
+
+function ensurePanel() {
+  if (panel && !panel.webContents.isDestroyed()) return panel;
+  panel = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'panel', 'preload.js'),
+      contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false,
+    },
+  });
+  panel.setBackgroundColor('#00000000');
+  panel.setVisible(false);
+  const wc = panel.webContents;
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  wc.on('will-navigate', (e) => e.preventDefault());
+  wc.on('blur', () => hidePanel());
+  wc.on('before-input-event', (e, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') { e.preventDefault(); hidePanel(); activeWc()?.focus(); }
+  });
+  wc.on('did-finish-load', () => { wc.send('appearance', appearance()); pushPanel(true); });
+  wc.loadFile(path.join(__dirname, 'panel', 'adblock.html'));
+  win.contentView.addChildView(panel);
+  return panel;
+}
+
+let panelAnchor = 0;
+function placePanel() {
+  if (!panel || !win) return;
+  const { width } = win.getContentBounds();
+  const x = Math.max(8, Math.min(width - PANEL_W - 4, Math.round(panelAnchor - PANEL_W + 12)));
+  panel.setBounds({ x, y: uiHeight() - 8, width: PANEL_W, height: panelHeight });
+}
+
+function togglePanel(anchorRight) {
+  if (panelOpen) { hidePanel(); return; }
+  if (Date.now() - panelHiddenAt < 300) return; // the click that just closed it
+  panelAnchor = Number(anchorRight) || 0;
+  const p = ensurePanel();
+  win.contentView.addChildView(p); // bring to front
+  placePanel();
+  p.setVisible(true);
+  panelOpen = true;
+  pushPanel(true);
+  p.webContents.focus();
+  p.webContents.send('panel-open');
+}
+
+function hidePanel() {
+  if (!panel || !panelOpen) return;
+  panelOpen = false;
+  panelHiddenAt = Date.now();
+  panel.setVisible(false);
+}
+
+function panelState() {
+  const t = tabs.get(activeId);
+  const wc = t ? t.view.webContents : null;
+  const url = wc && !wc.isDestroyed() ? wc.getURL() : '';
+  const site = /^https?:/.test(url) ? siteOf(url) : null;
+  return {
+    site,
+    blocked: t ? t.blocked : 0,
+    total: settings.stats.blocked || 0,
+    enabled: settings.adblock.enabled,
+    allowed: !!site && settings.adblock.allowlist.includes(site),
+    level: settings.adblock.level,
+    state: shieldState,
+    allowlistCount: settings.adblock.allowlist.length,
+    rulesCount: settings.adblock.customRules.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('!')).length,
+  };
+}
+
+let panelTimer = null;
+function pushPanel(now) {
+  if (!panel || !panelOpen || panel.webContents.isDestroyed()) return;
+  if (now) { panel.webContents.send('panel-state', panelState()); return; }
+  if (panelTimer) return;
+  panelTimer = setTimeout(() => { panelTimer = null; if (panelOpen) panel.webContents.send('panel-state', panelState()); }, 120);
+}
+
+function wirePanelIpc() {
+  const fromPanel = (fn) => (event, ...args) => { if (panel && event.sender === panel.webContents) return fn(...args); return undefined; };
+  const reloadActiveWeb = () => { const wc = activeWc(); if (wc && /^https?:/.test(wc.getURL())) wc.reload(); };
+  ipcMain.on('panel:size', fromPanel((h) => { panelHeight = Math.max(120, Math.min(640, Math.ceil(Number(h) || 420))); placePanel(); }));
+  ipcMain.on('panel:close', fromPanel(() => { hidePanel(); activeWc()?.focus(); }));
+  ipcMain.on('panel:settings', fromPanel((hash) => { hidePanel(); openInternal(SETTINGS_URL + (hash === 'filters' ? '#adblock' : '#adblock')); }));
+  ipcMain.handle('panel:set', fromPanel(async (patch) => {
+    await applySettings({ adblock: patch });
+    pushPanel(true);
+    await blockerPromise;
+    reloadActiveWeb();
+    pushPanel(true);
+    return panelState();
+  }));
+  ipcMain.handle('panel:toggle-site', fromPanel(async () => {
+    const st = panelState();
+    if (!st.site) return st;
+    const list = settings.adblock.allowlist;
+    const next = list.includes(st.site) ? list.filter((s) => s !== st.site) : [...list, st.site];
+    await applySettings({ adblock: { allowlist: next } });
+    reloadActiveWeb();
+    pushPanel(true);
+    return panelState();
+  }));
+}
+
+function showShieldMenu(x, y) {
+  const wc = activeWc();
+  const t = tabs.get(activeId);
+  const url = wc ? wc.getURL() : '';
+  const site = /^https?:/.test(url) ? siteOf(url) : null;
+  const on = settings.adblock.enabled;
+  const allowed = !!site && settings.adblock.allowlist.includes(site);
+  const level = settings.adblock.level;
+  const reloadIfWeb = () => { if (site && wc && !wc.isDestroyed()) wc.reload(); };
+  let header = 'Ad blocker';
+  if (!on) header = 'Ad blocker is off';
+  else if (shieldState === 'error') header = "Ad blocker couldn't load its lists";
+  else if (allowed) header = `Paused on ${site}`;
+  else if (site) header = `${t ? t.blocked : 0} ads and trackers blocked on this page`;
+  const LEVELS = [
+    ['ads', 'Ads only'],
+    ['standard', 'Standard (ads + trackers)'],
+    ['strict', 'Strict (+ cookie banners, popups)'],
+  ];
+  const items = [
+    { label: header, enabled: false },
+    { type: 'separator' },
+    {
+      label: 'Ad blocker on', type: 'checkbox', checked: on,
+      click: async () => { await applySettings({ adblock: { enabled: !on } }); await blockerPromise; reloadIfWeb(); },
+    },
+  ];
+  if (site) {
+    items.push({ label: `Block on ${site}`, type: 'checkbox', checked: !allowed, enabled: on, click: () => toggleSiteShield() });
+  }
+  items.push(
+    { type: 'separator' },
+    { label: 'Blocking level', enabled: false },
+    ...LEVELS.map(([value, label]) => ({
+      label, type: 'radio', checked: level === value, enabled: on,
+      click: async () => {
+        if (settings.adblock.level === value) return;
+        await applySettings({ adblock: { level: value } });
+        toast(`Blocking level: ${label}`);
+        await blockerPromise;
+        reloadIfWeb();
+      },
+    })),
+    { type: 'separator' },
+    { label: 'Ad blocker settings…', click: () => openInternal(SETTINGS_URL + '#adblock') },
+  );
+  const menu = Menu.buildFromTemplate(items);
+  const opts = { window: win };
+  if (Number.isFinite(x) && Number.isFinite(y)) { opts.x = Math.round(x); opts.y = Math.round(y); }
+  menu.popup(opts);
+}
+
+function toggleSiteShield() {
+  const wc = activeWc();
+  const site = wc && /^https?:/.test(wc.getURL()) ? siteOf(wc.getURL()) : null;
+  if (!site) return;
+  const list = settings.adblock.allowlist;
+  const next = list.includes(site) ? list.filter((s) => s !== site) : [...list, site];
+  applySettings({ adblock: { allowlist: next } }).then(() => {
+    toast(next.includes(site) ? `Ad blocker paused on ${site}` : `Ad blocker on for ${site}`);
+    wc.reload();
+  });
+}
+
+function wireUiIpc() {
+  ipcMain.on('navigate', fromUi((text) => navigate(text)));
+  ipcMain.on('new-tab', fromUi(() => createTab(null, { position: 'end' })));
+  ipcMain.on('close-tab', fromUi((id) => closeTab(id)));
+  ipcMain.on('activate', fromUi((id) => activateTab(id)));
+  ipcMain.on('back', fromUi(() => activeWc()?.navigationHistory.goBack()));
+  ipcMain.on('forward', fromUi(() => activeWc()?.navigationHistory.goForward()));
+  ipcMain.on('reload', fromUi(() => reload(false)));
+  ipcMain.on('stop', fromUi(() => activeWc()?.stop()));
+  ipcMain.on('settings', fromUi(() => openInternal(SETTINGS_URL)));
+  ipcMain.on('shield', fromUi((right) => { hideExtMenu(); togglePanel(right); }));
+  ipcMain.on('focus-page', fromUi(() => activeWc()?.focus()));
+  // Warm up a connection before the user hits Enter or clicks.
+  ipcMain.on('preconnect', fromUi((url) => {
+    try {
+      const target = url ? new URL(url) : new URL(SEARCH_ENGINES[settings.searchEngine]);
+      if (/^https?:$/.test(target.protocol)) ses.preconnect({ url: target.origin, numSockets: 1 });
+    } catch { /* ignore */ }
+  }));
+  ipcMain.on('tab-menu', fromUi((id) => tabMenu(id)));
+  ipcMain.on('group-menu', fromUi((gid) => groupMenu(gid)));
+  ipcMain.on('group-toggle', fromUi((gid) => { const g = groups.get(gid); if (g) setGroupCollapsed(gid, !g.collapsed); }));
+  ipcMain.on('group-rename', fromUi((gid, name) => {
+    const g = groups.get(gid);
+    if (g) { g.name = String(name || '').slice(0, 40); scheduleState(); saveTabsSoon(); }
+  }));
+  ipcMain.on('move-tab', fromUi((id, beforeId, groupId) => moveTab(id, beforeId, groupId)));
+  ipcMain.on('merge-tabs', fromUi((id, targetId) => mergeTabs(id, targetId)));
+  ipcMain.on('move-group', fromUi((gid, beforeId) => moveGroup(gid, beforeId)));
+  ipcMain.on('add-to-group', fromUi((id, gid) => addToGroup(id, gid)));
+  ipcMain.on('find', fromUi((text, forward, next) => {
+    const wc = activeWc();
+    if (!wc) return;
+    if (!text) { wc.stopFindInPage('clearSelection'); ui.webContents.send('find-result', { active: 0, total: 0 }); return; }
+    wc.findInPage(String(text), { forward: forward !== false, findNext: !!next });
+  }));
+  ipcMain.on('find-stop', fromUi(() => { activeWc()?.stopFindInPage('clearSelection'); activeWc()?.focus(); }));
+}
+
+// ------------------------------------------------------- internal pages IPC
+function fromPage(host, handler) {
+  return (event, ...args) => {
+    const url = event.senderFrame && event.senderFrame.url;
+    if (!url || !url.startsWith(`${SCHEME}://${host}/`)) throw new Error('forbidden');
+    return handler(...args);
+  };
+}
+
+function cookieUrl(c) {
+  const host = String(c.domain || '').replace(/^\./, '');
+  return `${c.secure ? 'https' : 'http'}://${host}${c.path || '/'}`;
+}
+
+function wirePagesIpc() {
+  ipcMain.on('goat:fp-config', (event) => {
+    const url = event.senderFrame && event.senderFrame.url;
+    const level = settings ? settings.privacy.fingerprint : 'off';
+    let top = url;
+    try { top = event.sender.getURL() || url; } catch { /* ignore */ }
+    if (!url || !/^https?:/.test(url) || level === 'off') { event.returnValue = { level: 'off' }; return; }
+    event.returnValue = { level, seed: fpSeed(top || url), chrome: CHROME_MAJOR };
+  });
+  ipcMain.on('goat:appearance-get', (event) => {
+    const url = event.senderFrame && event.senderFrame.url;
+    event.returnValue = url && url.startsWith(`${SCHEME}://`) && settings ? appearance() : null;
+  });
+  ipcMain.handle('goat:newtab-bookmarks', fromPage('newtab', () => bookmarks.items));
+  ipcMain.handle('goat:newtab-add', fromPage('newtab', (rawUrl, rawTitle) => {
+    const text = String(rawUrl || '').trim();
+    const url = toUrl(text);
+    if (!url || url === searchUrl(text) || !/^(https?|goat):/i.test(url)) return { error: 'Enter a web address, like youtube.com' };
+    let title = String(rawTitle || '').trim();
+    if (!title) {
+      try {
+        const h = new URL(url).hostname.replace(/^www\./, '').split('.')[0];
+        title = h.charAt(0).toUpperCase() + h.slice(1);
+      } catch { title = url; }
+    }
+    return addBookmark(url, title) ? { ok: true } : { error: "That address can't be bookmarked" };
+  }));
+  ipcMain.handle('goat:newtab-remove', fromPage('newtab', (id) => { removeBookmark(String(id)); return true; }));
+  ipcMain.handle('goat:newtab-open', fromPage('newtab', (id, how) => {
+    const hit = findBookmark(String(id));
+    if (hit && hit.b.type === 'link') openBookmarkUrl(hit.b.url, how === 'background' ? 'background' : 'current');
+  }));
+  ipcMain.handle('goat:newtab-search', fromPage('newtab', (q) => {
+    const u = toUrl(q);
+    const t = activeWc();
+    if (u && t) t.loadURL(u);
+  }));
+  ipcMain.handle('goat:settings-get', fromPage('settings', () => ({
+    settings: publicSettings(),
+    blocker: blockerStatus(),
+    engines: Object.keys(SEARCH_ENGINES),
+    themes: Object.entries(THEMES).map(([id, t]) => ({ id, name: t.name, scheme: t.scheme })),
+    customVars: Object.fromEntries(settings.appearance.customThemes.map((t) => [t.id, customVars(t.colors)])),
+    version: app.getVersion(),
+    chrome: process.versions.chrome,
+  })));
+  ipcMain.handle('goat:settings-set', fromPage('settings', (patch) => applySettings(patch)));
+  ipcMain.handle('goat:blocker-status', fromPage('settings', () => blockerStatus()));
+  ipcMain.handle('goat:blocker-refresh', fromPage('settings', async () => {
+    fs.rmSync(path.join(userDir(), 'blocklists'), { recursive: true, force: true });
+    blockerPromise = reloadBlocker();
+    await blockerPromise;
+    return blockerStatus();
+  }));
+  ipcMain.handle('goat:cookies-list', fromPage('settings', async () => {
+    const list = await ses.cookies.get({});
+    return list.map((c) => ({
+      domain: c.domain, name: c.name, value: c.value, path: c.path, secure: c.secure,
+      httpOnly: c.httpOnly, session: c.session, expirationDate: c.expirationDate, sameSite: c.sameSite,
+      hostOnly: c.hostOnly,
+    }));
+  }));
+  ipcMain.handle('goat:cookies-remove', fromPage('settings', async (list) => {
+    for (const c of list || []) await ses.cookies.remove(cookieUrl(c), c.name).catch(() => {});
+    return true;
+  }));
+  ipcMain.handle('goat:cookies-set', fromPage('settings', async (c, original) => {
+    if (original && (original.name !== c.name || original.domain !== c.domain || original.path !== c.path)) {
+      await ses.cookies.remove(cookieUrl(original), original.name).catch(() => {});
+    }
+    const details = {
+      url: cookieUrl(c), name: String(c.name), value: String(c.value ?? ''), path: c.path || '/',
+      secure: !!c.secure, httpOnly: !!c.httpOnly,
+      sameSite: ['unspecified', 'no_restriction', 'lax', 'strict'].includes(c.sameSite) ? c.sameSite : 'lax',
+    };
+    if (!c.hostOnly && c.domain) details.domain = c.domain;
+    if (!c.session && c.expirationDate) details.expirationDate = Number(c.expirationDate);
+    await ses.cookies.set(details);
+    return true;
+  }));
+  ipcMain.handle('goat:cookies-clear', fromPage('settings', async () => {
+    await ses.clearStorageData({ storages: ['cookies'] });
+    return true;
+  }));
+  ipcMain.handle('goat:tasks', fromPage('settings', () => taskList()));
+  ipcMain.handle('goat:dns-status', fromPage('settings', () => dnsStatus()));
+  ipcMain.handle('goat:dns-check', fromPage('settings', (url) => { if (/^https:\/\//.test(String(url))) createTab(String(url)); }));
+  ipcMain.handle('goat:task-sleep', fromPage('settings', (id) => {
+    const t = tabs.get(id);
+    if (t && id !== activeId) sleepTab(t);
+    return true;
+  }));
+  ipcMain.handle('goat:task-close', fromPage('settings', (id) => { closeTab(id); return true; }));
+  ipcMain.handle('goat:clear-data', fromPage('settings', async () => {
+    await clearBrowsingData();
+    return true;
+  }));
+}
+
+// ----------------------------------------------------------------- extensions
+const extApi = () => ses.extensions || ses; // Electron 36+ moved these to session.extensions
+const extensionsDir = () => path.join(userDir(), 'Extensions');
+
+function describePermissions(manifest) {
+  const perms = [...(manifest.permissions || []), ...(manifest.host_permissions || [])]
+    .filter((p) => typeof p === 'string');
+  const broad = perms.some((p) => p === '<all_urls>' || p.startsWith('*://*/') || p === 'http://*/*' || p === 'https://*/*');
+  const lines = [];
+  if (broad) lines.push('• Read and change data on all websites');
+  if (perms.includes('tabs')) lines.push('• See your open tabs');
+  if (perms.includes('cookies')) lines.push('• Read and change cookies');
+  if (perms.includes('history')) lines.push('• Read browsing history');
+  if (perms.includes('downloads')) lines.push('• Manage downloads');
+  if (perms.includes('webRequest') || perms.includes('declarativeNetRequest')) lines.push('• Block or change network requests');
+  return lines.length ? 'It will be able to:\n' + lines.join('\n') : 'It asks for no special permissions.';
+}
+
+async function setupExtensions() {
+  try {
+    extensions = new ElectronChromeExtensions({
+      session: ses,
+      createTab: async (details) => {
+        const t = createTab(details.url || null, { activate: details.active !== false, position: 'end' });
+        return [t.view.webContents, win];
+      },
+      selectTab: (wc) => { const t = tabByWebContentsId(wc.id); if (t) activateTab(t.id); },
+      removeTab: (wc) => { const t = tabByWebContentsId(wc.id); if (t) closeTab(t.id); },
+      createWindow: async (details) => {
+        const urls = [].concat(details.url || []);
+        for (const u of urls.length ? urls : [null]) createTab(u, { position: 'end' });
+        return win;
+      },
+      removeWindow: () => {},
+      requestPermissions: async (ext, perms) => {
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'question', buttons: ['Deny', 'Allow'], defaultId: 0, cancelId: 0,
+          message: `“${ext.name}” wants more permissions.`,
+          detail: describePermissions({ permissions: perms.permissions, host_permissions: perms.origins }),
+        });
+        return response === 1;
+      },
+    });
+    ElectronChromeExtensions.handleCRXProtocol(session.defaultSession); // toolbar icons
+    extensions.ctx.goatName = (e) => extText(e, e.name);
+    // Right-click on a toolbar extension button: add pin/unpin and manage.
+    extensions.on('goat-action-context-menu', ({ extension, append, appendSeparator }) => {
+      const pinned = (settings.extensions.pinned || []).includes(extension.id);
+      appendSeparator();
+      append({ label: pinned ? 'Unpin from toolbar' : 'Pin to toolbar', click: () => setExtensionPinned(extension.id, !pinned) });
+      append({ label: 'Manage extensions', click: () => openInternal(SETTINGS_URL + '#extensions') });
+    });
+    const onExtChange = () => { extMsgCache.clear(); extIconCache.clear(); pushExtMenu(); scheduleState(); };
+    extApi().on('extension-loaded', onExtChange);
+    extApi().on('extension-unloaded', onExtChange);
+    await installChromeWebStore({
+      session: ses,
+      extensionsPath: extensionsDir(),
+      autoUpdate: true,
+      beforeInstall: async (d) => {
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'question', buttons: ['Cancel', 'Add extension'], defaultId: 1, cancelId: 0,
+          message: `Add “${d.localizedName}” to Goat Browser?`,
+          detail: describePermissions(d.manifest),
+          icon: d.icon,
+        });
+        return { action: response === 1 ? 'allow' : 'deny' };
+      },
+    });
+    for (const dir of settings.extensions.unpacked) {
+      await extApi().loadExtension(dir, { allowFileAccess: true }).catch((e) => toast(`Could not load extension in ${dir}: ${e.message}`));
+    }
+    // New installs start unpinned (like Chrome). One-time move from the old
+    // "hidden" list: extensions that were showing stay pinned.
+    if (!Array.isArray(settings.extensions.pinned)) {
+      const hidden = new Set(settings.extensions.hidden || []);
+      settings.extensions.pinned = extApi().getAllExtensions().map((e) => e.id).filter((id) => !hidden.has(id));
+      saveSettings();
+    }
+    scheduleState();
+  } catch (err) {
+    console.error('extensions', err);
+    toast('Extensions could not start: ' + err.message);
+  }
+}
+
+function extensionMenuItems(wc, params) {
+  try {
+    const items = extensions ? extensions.getContextMenuItems(wc, params) : [];
+    return items.length ? [...items, { type: 'separator' }] : [];
+  } catch { return []; }
+}
+
+// "__MSG_extName__" style names and descriptions come from the extension's _locales.
+const extMsgCache = new Map();
+function extMessages(e) {
+  if (extMsgCache.has(e.id + e.version)) return extMsgCache.get(e.id + e.version);
+  const m = e.manifest || {};
+  const lang = app.getLocale().replace('-', '_');
+  let msgs = {};
+  for (const loc of [lang, lang.split('_')[0], m.default_locale, 'en'].filter(Boolean)) {
+    try { msgs = JSON.parse(fs.readFileSync(path.join(e.path, '_locales', loc, 'messages.json'), 'utf8')); break; } catch { /* try next */ }
+  }
+  const lower = Object.fromEntries(Object.entries(msgs).map(([k, v]) => [k.toLowerCase(), v && v.message]));
+  extMsgCache.set(e.id + e.version, lower);
+  return lower;
+}
+function extText(e, text) {
+  const t = String(text || '');
+  const mm = /^__MSG_(.+)__$/.exec(t);
+  return mm ? (extMessages(e)[mm[1].toLowerCase()] || t) : t;
+}
+const extIconCache = new Map();
+function extIcon(e) {
+  if (extIconCache.has(e.id + e.version)) return extIconCache.get(e.id + e.version);
+  const m = e.manifest || {};
+  const sets = [m.icons, (m.action || m.browser_action || {}).default_icon].filter((x) => x && typeof x === 'object');
+  let best = null;
+  for (const set of sets) {
+    for (const [size, file] of Object.entries(set)) {
+      const n = Number(size);
+      if (!best || (n >= 32 && (best.n < 32 || n < best.n)) || (best.n < 32 && n > best.n)) best = { n, file };
+    }
+  }
+  let url = null;
+  if (best) {
+    try {
+      const buf = fs.readFileSync(path.join(e.path, String(best.file).replace(/^\//, '')));
+      const ext = path.extname(best.file).toLowerCase();
+      const mime = ext === '.svg' ? 'image/svg+xml' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'image/png';
+      url = `data:${mime};base64,${buf.toString('base64')}`;
+    } catch { /* no icon */ }
+  }
+  extIconCache.set(e.id + e.version, url);
+  return url;
+}
+
+function listExtensions() {
+  return extApi().getAllExtensions().map((e) => {
+    const m = e.manifest || {};
+    const options = (m.options_ui && m.options_ui.page) || m.options_page || null;
+    return {
+      id: e.id, name: extText(e, e.name), version: e.version, description: extText(e, m.description || ''),
+      icon: extIcon(e), pinned: (settings.extensions.pinned || []).includes(e.id), hasAction: !!(m.action || m.browser_action),
+      unpacked: settings.extensions.unpacked.includes(e.path), hasOptions: !!options,
+    };
+  });
+}
+
+function wireExtensionsIpc() {
+  ipcMain.handle('goat:ext-list', fromPage('settings', () => listExtensions()));
+  ipcMain.handle('goat:ext-pin', fromPage('settings', (id, pinned) => { setExtensionPinned(String(id), !!pinned); return listExtensions(); }));
+  ipcMain.handle('goat:ext-webstore', fromPage('settings', () => { createTab('https://chromewebstore.google.com/category/extensions'); }));
+  ipcMain.handle('goat:ext-options', fromPage('settings', (id) => {
+    const e = extApi().getExtension(id);
+    if (!e) return;
+    const m = e.manifest || {};
+    const page = (m.options_ui && m.options_ui.page) || m.options_page;
+    if (page) createTab(`chrome-extension://${id}/${page.replace(/^\//, '')}`);
+  }));
+  ipcMain.handle('goat:ext-remove', fromPage('settings', async (id) => {
+    const e = extApi().getExtension(id);
+    if (!e) return listExtensions();
+    if (settings.extensions.unpacked.includes(e.path)) {
+      extApi().removeExtension(id);
+      settings.extensions.unpacked = settings.extensions.unpacked.filter((p) => p !== e.path);
+      saveSettings();
+    } else {
+      await uninstallExtension(id, { session: ses, extensionsPath: extensionsDir() });
+    }
+    return listExtensions();
+  }));
+  ipcMain.handle('goat:ext-load-unpacked', fromPage('settings', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'Choose an unpacked extension folder (with manifest.json)', properties: ['openDirectory'],
+    });
+    if (r.canceled || !r.filePaths[0]) return { list: listExtensions() };
+    const dir = r.filePaths[0];
+    try {
+      await extApi().loadExtension(dir, { allowFileAccess: true });
+      if (!settings.extensions.unpacked.includes(dir)) {
+        settings.extensions.unpacked = [...settings.extensions.unpacked, dir];
+        saveSettings();
+      }
+      return { list: listExtensions() };
+    } catch (err) {
+      return { list: listExtensions(), error: err.message };
+    }
+  }));
+}
+
+// --------------------------------------------------------------------- window
+function layout() {
+  if (!win) return;
+  const { width, height } = win.getContentBounds();
+  const top = fullscreen ? 0 : uiHeight();
+  ui.setVisible(!fullscreen);
+  ui.setBounds({ x: 0, y: 0, width, height: uiHeight() });
+  const t = tabs.get(activeId);
+  if (t) t.view.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) });
+}
+
+function createWindow() {
+  win = new BaseWindow({
+    width: 1280, height: 840, minWidth: 520, minHeight: 320,
+    title: 'Goat Browser', backgroundColor: appearance().bg, icon: path.join(__dirname, 'icon.png'),
+    // Hide the OS title bar; min/max/close are drawn over the right end of the tab strip.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#00000000', symbolColor: appearance().text, height: CONTROLS_HEIGHT },
+  });
+  ui = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'ui', 'preload.bundle.js'),
+      contextIsolation: true, sandbox: true, nodeIntegration: false, spellcheck: false,
+    },
+  });
+  ui.setBackgroundColor('#101214');
+  win.contentView.addChildView(ui);
+  ui.webContents.on('before-input-event', handleShortcut);
+  ui.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  ui.webContents.on('will-navigate', (e) => e.preventDefault());
+  ui.webContents.loadFile(path.join(__dirname, 'ui', 'index.html'));
+  ui.webContents.on('did-finish-load', () => { applyAppearance(); pushState(); });
+  win.on('resize', () => { hidePanel(); hideExtMenu(); layout(); });
+  win.on('blur', () => { hidePanel(); hideExtMenu(); });
+  win.on('leave-full-screen', () => { if (fullscreen) { fullscreen = false; layout(); } });
+  win.on('close', () => { saveTabsNow(); });
+  win.on('closed', () => { win = null; app.quit(); });
+  layout();
+}
+
+// ------------------------------------------------------------------ lifecycle
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (_e, argv) => {
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.focus();
+    const url = argv.find((a) => /^https?:\/\//.test(a));
+    if (url) createTab(url, { position: 'end' });
+  });
+
+  app.whenReady().then(async () => {
+    Menu.setApplicationMenu(null);
+    loadSettings();
+    loadBookmarks();
+    settings.appearance.customThemes = sanitizeCustomThemes(settings.appearance.customThemes);
+    { const info = themeInfo(settings.appearance.theme); nativeTheme.themeSource = info && settings.appearance.theme !== 'system' ? info.scheme : 'system'; }
+    applyDns();
+    setupSession();
+    await applyProxy();
+    wireUiIpc();
+    wirePagesIpc();
+    wireExtensionsIpc();
+    wirePanelIpc();
+    wireExtMenuIpc();
+    wireBookmarksIpc();
+    createWindow();
+    await setupExtensions();
+
+    // Load blocklists before the first page so it loads protected.
+    blockerPromise = reloadBlocker();
+    await blockerPromise;
+    if (!win) return;
+    const startUrl = process.argv.find((a) => /^https?:\/\//.test(a));
+    if (!restoreTabs()) createTab(startUrl || null);
+    else if (startUrl) createTab(startUrl, { position: 'end' });
+  });
+}
+
+app.on('window-all-closed', () => app.quit());
+app.on('before-quit', (e) => {
+  if (quitting || !settings || !ses) return;
+  e.preventDefault();
+  quitting = true;
+  const first = settings.cookies.clearOnExit ? ses.clearStorageData({ storages: ['cookies'] }) : Promise.resolve();
+  Promise.allSettled([first])
+    .then(() => Promise.allSettled([ses.cookies.flushStore(), Promise.resolve(ses.flushStorageData())]))
+    .finally(() => app.quit());
+});
+// electron-chrome-extensions can hang Electron's native shutdown (main process
+// spins after will-quit). Cookies, storage, settings and tabs are already saved
+// by this point, so end the process directly.
+app.on('will-quit', () => {
+  try { if (settings) fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2)); } catch { /* ignore */ }
+  if (typeof process.reallyExit === 'function') process.reallyExit(0);
+  else process.kill(process.pid, 'SIGKILL');
+});
+
+// Test hooks (only when GOAT_TEST is set).
+if (process.env.GOAT_TEST) {
+  global.__goat = {
+    createTab, newGroupWith, setGroupCollapsed, addToGroup, removeFromGroup, applySettings, mergeTabs, moveGroup,
+    togglePanel, hidePanel, panel: () => panel, addBookmark, bookmarks: () => bookmarks, toggleBookmarkForActive,
+    sleepTab, discardTab, activateTab, pendingUrls, listExtensions, shield: () => shieldState,
+    groups, tabs, order: () => order, activeId: () => activeId, session: () => ses, pushState,
+  };
+}

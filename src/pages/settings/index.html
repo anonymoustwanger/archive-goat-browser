@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' goat://static; style-src goat://static; img-src data:">
+  <title>Settings</title>
+  <script src="goat://static/theme.js"></script>
+  <link rel="stylesheet" href="goat://static/themes.css">
+  <link rel="stylesheet" href="goat://static/shared.css">
+  <link rel="stylesheet" href="goat://static/settings.css">
+</head>
+<body class="settings">
+  <nav class="side">
+    <div class="brand">goat<span>.</span> settings</div>
+    <a href="#general">General</a>
+    <a href="#appearance">Appearance</a>
+    <a href="#privacy">Privacy</a>
+    <a href="#adblock">Ad blocker</a>
+    <a href="#cookies">Cookies</a>
+    <a href="#extensions">Extensions</a>
+    <a href="#proxy">Proxy</a>
+    <a href="#data">Clear data</a>
+    <a href="#about">About</a>
+  </nav>
+
+  <div class="content">
+    <section id="general">
+      <h2>General</h2>
+      <div class="card">
+        <label class="row"><span><b>Search engine</b><small>Used by the address bar and new tab page.</small></span>
+          <select data-key="searchEngine">
+            <option value="duckduckgo">DuckDuckGo</option>
+            <option value="brave">Brave Search</option>
+            <option value="startpage">Startpage</option>
+            <option value="google">Google</option>
+            <option value="bing">Bing</option>
+          </select>
+        </label>
+        <label class="row"><span><b>Reopen tabs on startup</b><small>Restores your tabs and tab groups.</small></span>
+          <input type="checkbox" class="toggle" data-key="restoreTabs">
+        </label>
+        <label class="row"><span><b>HTTPS-only mode</b><small>Upgrades http:// to https://. You can still opt in per site.</small></span>
+          <input type="checkbox" class="toggle" data-key="httpsOnly">
+        </label>
+        <div class="row col" id="dnsrow">
+          <label class="dnshead"><span><b>Encrypted DNS</b><small>Site lookups are sent encrypted (DNS over HTTPS), so your internet provider can't see or change them.</small></span>
+            <select data-key="dns.provider" id="dnsprovider">
+              <option value="quad9">Quad9 (recommended)</option>
+              <option value="mullvad">Mullvad</option>
+              <option value="mullvadAdblock">Mullvad, blocks ads</option>
+              <option value="cloudflare">Cloudflare</option>
+              <option value="google">Google</option>
+              <option value="adguard">AdGuard, blocks ads</option>
+              <option value="nextdns">NextDNS</option>
+              <option value="custom">Custom…</option>
+              <option value="off">Off (use Windows DNS)</option>
+            </select>
+          </label>
+          <div class="grid" id="dnsnext" hidden>
+            <label class="wide">NextDNS configuration ID <input data-key="dns.nextdnsId" placeholder="abc123" spellcheck="false"></label>
+          </div>
+          <div class="grid" id="dnscustom" hidden>
+            <label class="wide">DNS-over-HTTPS address <input data-key="dns.custom" placeholder="https://dns.example.com/dns-query" spellcheck="false"></label>
+          </div>
+          <div class="dnsstatus"><span id="dnsstate" class="muted">Checking…</span>
+            <span class="dnsbtns"><button type="button" id="dnstest">Test again</button><button type="button" id="dnscheck" hidden>Open check page</button></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="appearance">
+      <h2>Appearance</h2>
+      <div class="card">
+        <div class="row col">
+          <span><b>Theme</b><small>Applies to the toolbar, Goat's own pages, and tells websites to use dark or light mode.</small></span>
+          <div class="themes" id="themes" role="radiogroup" aria-label="Theme"></div>
+        </div>
+        <div class="row col" id="editor" hidden>
+          <span><b id="editortitle">New theme</b><small>Pick five colors. The rest are worked out for you.</small></span>
+          <div class="editor">
+            <div class="fields">
+              <label class="wide">Name <input id="ed-name" maxlength="30" placeholder="My theme" spellcheck="false"></label>
+              <label class="wide">Start from
+                <select id="ed-base"></select>
+              </label>
+              <label class="color">Background <input type="color" id="ed-bg"></label>
+              <label class="color">Surface <input type="color" id="ed-surface"></label>
+              <label class="color">Text <input type="color" id="ed-text"></label>
+              <label class="color">Accent <input type="color" id="ed-accent"></label>
+              <label class="color">Accent 2 <input type="color" id="ed-accent2"></label>
+              <p class="warnmsg" id="ed-warn" hidden></p>
+            </div>
+            <div class="preview" id="ed-preview" aria-label="Preview">
+              <div class="pv-strip"><i class="on"></i><i></i><i></i></div>
+              <div class="pv-nav"><b></b><u></u></div>
+              <div class="pv-page">
+                <div class="pv-title">Aa</div>
+                <div class="pv-text"></div><div class="pv-text short"></div>
+                <div class="pv-btn">Button</div>
+              </div>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="primary" id="ed-save">Save and use</button>
+            <button id="ed-cancel">Cancel</button>
+            <button class="danger" id="ed-delete" hidden>Delete theme</button>
+          </div>
+        </div>
+        <label class="row"><span><b>Gradients</b><small>Soft color gradients on the toolbar, pages and buttons.</small></span>
+          <input type="checkbox" class="toggle" data-key="appearance.gradients">
+        </label>
+        <div class="row col">
+          <span><b>Animations</b><small>Tab, folder and page motion.</small></span>
+          <div class="radios">
+            <label><input type="radio" name="motion" value="system" data-key="appearance.motion"> <span><b>Follow system</b><small>On, unless Windows has "Animation effects" turned off.</small></span></label>
+            <label><input type="radio" name="motion" value="on" data-key="appearance.motion"> <span><b>On</b></span></label>
+            <label><input type="radio" name="motion" value="off" data-key="appearance.motion"> <span><b>Off</b><small>Everything changes instantly.</small></span></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="privacy">
+      <h2>Privacy</h2>
+      <div class="card">
+        <div class="row col">
+          <span><b>Fingerprint protection</b><small>Stops sites from identifying your device by its hardware, GPU and browser details.</small></span>
+          <div class="radios">
+            <label><input type="radio" name="fp" value="off" data-key="privacy.fingerprint"> <span><b>Off</b></span></label>
+            <label><input type="radio" name="fp" value="standard" data-key="privacy.fingerprint"> <span><b>Standard</b><small>Reports common hardware and GPU values, hides exact OS and CPU details. Recommended.</small></span></label>
+            <label><input type="radio" name="fp" value="strict" data-key="privacy.fingerprint"> <span><b>Strict</b><small>Also adds tiny per-site noise to canvas and audio readouts. Rarely, image editors or games may misbehave.</small></span></label>
+          </div>
+        </div>
+        <label class="row"><span><b>Remove tracking from links</b><small>Strips tags like utm_source, fbclid and gclid from addresses you open.</small></span>
+          <input type="checkbox" class="toggle" data-key="privacy.stripTracking">
+        </label>
+      </div>
+      <h3>Performance</h3>
+      <div class="card">
+        <label class="row"><span><b>Memory saver</b><small>Background tabs you haven't used for a while sleep to free memory. They wake when you open them.</small></span>
+          <select data-key="performance.sleepAfterMin" data-number="1">
+            <option value="0">Off</option>
+            <option value="5">After 5 minutes</option>
+            <option value="15">After 15 minutes</option>
+            <option value="30">After 30 minutes</option>
+            <option value="60">After 1 hour</option>
+            <option value="120">After 2 hours</option>
+          </select>
+        </label>
+        <div class="row col">
+          <span><b>Memory use</b><small id="memtotal">Measuring…</small></span>
+          <div class="tablewrap tasks"><table>
+            <thead><tr><th>Tab</th><th class="num">Memory</th><th></th></tr></thead>
+            <tbody id="tasklist"></tbody>
+          </table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="adblock">
+      <h2>Ad blocker</h2>
+      <div class="card">
+        <label class="row"><span><b>Block ads and trackers</b><small id="abstatus">Loading…</small></span>
+          <input type="checkbox" class="toggle" data-key="adblock.enabled">
+        </label>
+        <div class="row col">
+          <span><b>Blocking level</b></span>
+          <div class="radios">
+            <label><input type="radio" name="level" value="ads" data-key="adblock.level"> <span><b>Ads only</b><small>Lightest. Ads blocked, trackers allowed.</small></span></label>
+            <label><input type="radio" name="level" value="standard" data-key="adblock.level"> <span><b>Standard</b><small>Ads and trackers. Recommended.</small></span></label>
+            <label><input type="radio" name="level" value="strict" data-key="adblock.level"> <span><b>Strict</b><small>Also cookie banners, popups and other annoyances. May break some sites.</small></span></label>
+          </div>
+        </div>
+        <div class="row">
+          <span><b>Update blocklists</b><small>Lists refresh weekly on their own.</small></span>
+          <button id="abrefresh">Update now</button>
+        </div>
+      </div>
+
+      <h3>Allowed sites</h3>
+      <div class="card">
+        <p class="hint">The ad blocker is paused on these sites. You can also click the shield in the toolbar.</p>
+        <form class="inline" id="allowform">
+          <input id="allowinput" placeholder="example.com" spellcheck="false">
+          <button>Add</button>
+        </form>
+        <ul class="chips" id="allowlist"></ul>
+      </div>
+
+      <h3>Custom filters</h3>
+      <div class="card">
+        <p class="hint">One rule per line, Adblock Plus / uBlock syntax. Examples: <code>||ads.example.com^</code> blocks a domain, <code>example.com##.banner</code> hides an element, <code>@@||site.com^</code> allows it. Lines starting with <code>!</code> are comments.</p>
+        <textarea id="rules" rows="7" spellcheck="false"></textarea>
+        <div class="actions"><button class="primary" id="rulesave">Save filters</button><span class="saved" id="rulesaved"></span></div>
+      </div>
+    </section>
+
+    <section id="cookies">
+      <h2>Cookies</h2>
+      <div class="card">
+        <label class="row"><span><b>Block third-party cookies</b><small>Stops trackers that follow you across sites. Some embedded logins may need this off.</small></span>
+          <input type="checkbox" class="toggle" data-key="cookies.blockThirdParty">
+        </label>
+        <label class="row"><span><b>Delete cookies when Goat closes</b><small>Signs you out of sites on every exit.</small></span>
+          <input type="checkbox" class="toggle" data-key="cookies.clearOnExit">
+        </label>
+      </div>
+
+      <h3>Cookie manager</h3>
+      <div class="card">
+        <div class="toolbar">
+          <input id="cookiesearch" placeholder="Search sites or cookie names" spellcheck="false">
+          <span class="muted" id="cookiecount"></span>
+          <button id="cookiereload">Refresh</button>
+          <button class="danger" id="cookieclear">Delete all</button>
+        </div>
+        <div id="cookielist" class="cookielist"></div>
+      </div>
+    </section>
+
+    <section id="extensions">
+      <h2>Extensions</h2>
+      <div class="card">
+        <div class="toolbar">
+          <button class="primary" id="extstore">Get extensions from Chrome Web Store</button>
+          <button id="extunpacked">Load unpacked…</button>
+          <span class="saved" id="extmsg"></span>
+        </div>
+        <div id="extlist" class="extlist"></div>
+        <p class="hint">Most Chrome extensions work: ad blockers, password managers, dark mode, and so on. Some APIs aren't available yet (for example <code>chrome.commands</code>), so a few extensions may only partly work. Extension buttons appear next to the shield in the toolbar.</p>
+      </div>
+    </section>
+
+    <section id="proxy">
+      <h2>Proxy</h2>
+      <div class="card">
+        <div class="row col">
+          <div class="radios">
+            <label><input type="radio" name="pmode" value="system" data-proxy="mode"> <span><b>Use system proxy</b><small>Follows Windows proxy settings.</small></span></label>
+            <label><input type="radio" name="pmode" value="direct" data-proxy="mode"> <span><b>No proxy</b><small>Connect directly.</small></span></label>
+            <label><input type="radio" name="pmode" value="manual" data-proxy="mode"> <span><b>Manual</b><small>HTTP, HTTPS, SOCKS4 or SOCKS5 server.</small></span></label>
+            <label><input type="radio" name="pmode" value="pac" data-proxy="mode"> <span><b>Auto-config (PAC) URL</b></span></label>
+          </div>
+        </div>
+        <div class="grid" id="manualfields">
+          <label>Type
+            <select data-proxy="type">
+              <option value="socks5">SOCKS5</option>
+              <option value="socks4">SOCKS4</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </select>
+          </label>
+          <label>Host <input data-proxy="host" placeholder="127.0.0.1" spellcheck="false"></label>
+          <label>Port <input data-proxy="port" placeholder="1080" inputmode="numeric"></label>
+          <label>Username <input data-proxy="username" placeholder="optional" spellcheck="false" autocomplete="off"></label>
+          <label>Password <input data-proxy="password" type="password" placeholder="optional" autocomplete="new-password"></label>
+          <label class="wide">Bypass list <input data-proxy="bypass" placeholder="<local>, *.example.com" spellcheck="false"></label>
+        </div>
+        <div class="grid" id="pacfields">
+          <label class="wide">PAC URL <input data-proxy="pacUrl" placeholder="http://wpad/wpad.dat" spellcheck="false"></label>
+        </div>
+        <p class="hint">SOCKS5 sends DNS through the proxy. Chromium doesn't support SOCKS5 passwords: use an HTTP(S) proxy for login-protected servers.</p>
+        <div class="actions"><button class="primary" id="proxysave">Apply proxy</button><span class="saved" id="proxysaved"></span></div>
+      </div>
+    </section>
+
+    <section id="data">
+      <h2>Clear data</h2>
+      <div class="card">
+        <div class="row">
+          <span><b>Clear all browsing data</b><small>Deletes cookies, cache, site storage, and closes all tabs. Settings are kept.</small></span>
+          <button class="danger" id="cleardata">Clear everything</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="about">
+      <h2>About</h2>
+      <div class="card"><p class="hint" id="about-text"></p></div>
+    </section>
+  </div>
+  <script src="settings.js"></script>
+</body>
+</html>
