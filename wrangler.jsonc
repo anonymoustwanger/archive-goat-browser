@@ -1,0 +1,8 @@
+{
+  // Cloudflare: serve the static website in ./website (no build step).
+  "name": "goatbrowser",
+  "compatibility_date": "2026-11-06",
+  "assets": {
+    "directory": "./website"
+  }
+}
