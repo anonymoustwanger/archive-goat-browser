@@ -2,10 +2,8 @@
 node_modules/
 
 # Build output: the packaged app is too big for git (GitHub's limit is 100 MB per file).
-# Upload the zipped app to a GitHub Release instead.
+# Upload the installer (dist\GoatBrowserSetup-*.exe) to a GitHub Release instead.
 dist/
-dist-fast/
-fast-build/engine/
 *.asar
 
 # Old download copies

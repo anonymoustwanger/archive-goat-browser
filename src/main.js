@@ -2747,6 +2747,16 @@ function createWindow() {
 }
 
 // ------------------------------------------------------------------ lifecycle
+// A web address or a local page Windows asked Goat to open (default browser, "Open with").
+function launchUrl(argv) {
+  for (const a of argv.slice(1)) {
+    if (/^https?:\/\//i.test(a)) return a;
+    if (/\.(html?|xhtml|svg|pdf)$/i.test(a)) {
+      try { if (fs.statSync(a).isFile()) return pathToFileURL(path.resolve(a)).toString(); } catch { /* not a file */ }
+    }
+  }
+  return null;
+}
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -2754,7 +2764,7 @@ if (!app.requestSingleInstanceLock()) {
     if (!win) return;
     if (win.isMinimized()) win.restore();
     win.focus();
-    const url = argv.find((a) => /^https?:\/\//.test(a));
+    const url = launchUrl(argv);
     if (url) createTab(url, { position: 'end' });
   });
 
@@ -2808,7 +2818,7 @@ if (!app.requestSingleInstanceLock()) {
     blockerPromise = reloadBlocker();
     await blockerPromise;
     if (!win) return;
-    const startUrl = process.argv.find((a) => /^https?:\/\//.test(a));
+    const startUrl = launchUrl(process.argv);
     if (!restoreTabs()) createTab(startUrl || null);
     else if (startUrl) createTab(startUrl, { position: 'end' });
   });

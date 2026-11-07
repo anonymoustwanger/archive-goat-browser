@@ -8,9 +8,11 @@ A private, fast browser built on Chromium 156 via Electron 45.
 
 ## Run
 
+- **Installer:** `dist\GoatBrowserSetup-<version>.exe`. Installs for your user only (no admin), adds Start menu and desktop shortcuts, an uninstaller in Windows "Apps", and lists Goat in Default apps. Your profile is kept. Build it with `npm run installer` (needs [NSIS](https://nsis.sourceforge.io/) installed).
+- **Linux:** `dist/GoatBrowser-<version>-x86_64.AppImage`. Make it executable (`chmod +x`, or right-click → Properties → allow executing) and double-click. Build with `npm run appimage` on Linux (needs [appimagetool](https://github.com/AppImage/appimagetool) on PATH or in `$APPIMAGETOOL`). Profile: `~/.config/Goat Browser`.
+  <a id="linux"></a>Chromium's sandbox needs unprivileged user namespaces. On Ubuntu 24.04+ they're blocked by AppArmor, so the AppImage starts without the sandbox and some extensions may not fully work. To keep the sandbox, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (add it to `/etc/sysctl.d/` to keep it after reboot).
 - **Ready-made:** `dist\Goat Browser-win32-x64\GoatBrowser.exe`. Windows SmartScreen may warn because the exe is unsigned: choose "More info", then "Run anyway".
 - **From source:** `npm install`, then `npm start`. Repackage with `npm run package:win`.
-- **Thorium-style fast build:** see `fast-build\README.md`.
 
 Your profile (cookies, settings, open tabs, blocklists) lives in `%APPDATA%\Goat Browser`.
 

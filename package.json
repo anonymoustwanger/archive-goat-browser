@@ -1,11 +1,14 @@
 {
   "name": "goat-browser",
-  "version": "4.5.0",
+  "version": "4.6.0",
   "description": "Goat Browser: private, fast Chromium browser",
   "main": "src/main.js",
   "scripts": {
     "start": "npm run build && electron .",
-    "package:win": "npm run build && electron-packager . \"Goat Browser\" --platform=win32 --arch=x64 --out=dist --overwrite --asar --icon=build/icon.ico --ignore=^/dist --ignore=^/build --ignore=^/fast-build --executable-name=GoatBrowser",
+    "installer": "npm run package:win && makensis -DVERSION=%npm_package_version% installer/goat.nsi",
+    "package:linux": "npm run build && electron-packager . \"Goat Browser\" --platform=linux --arch=x64 --out=dist --overwrite --asar --ignore=^/dist --ignore=^/build --ignore=^/installer --ignore=^/website --executable-name=goat-browser",
+    "appimage": "npm run package:linux && sh installer/linux/build-appimage.sh",
+    "package:win": "npm run build && electron-packager . \"Goat Browser\" --platform=win32 --arch=x64 --out=dist --overwrite --asar --icon=build/icon.ico --ignore=^/dist --ignore=^/build --ignore=^/installer --ignore=^/website --executable-name=GoatBrowser",
     "build": "node scripts/patch-extensions.js && esbuild src/ui/preload.js --bundle --platform=node --format=cjs --external:electron --outfile=src/ui/preload.bundle.js",
     "postinstall": "node scripts/patch-extensions.js"
   },

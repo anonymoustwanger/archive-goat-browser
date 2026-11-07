@@ -12,9 +12,15 @@ Private, fast desktop browser for Windows built on Electron 45 (Chromium 156). O
 - `npm install`: installs deps and runs `scripts/patch-extensions.js` (postinstall). Required before anything else.
 - `npm start`: build the toolbar preload bundle, then run Goat from source.
 - `npm run build`: re-apply library patches + bundle `src/ui/preload.js` to `src/ui/preload.bundle.js` (esbuild).
+- `npm run installer`: package, then build `dist\GoatBrowserSetup-<version>.exe` with NSIS (`installer/goat.nsi`,
+  per-user, HKCU registration as a browser: StartMenuInternet + RegisteredApplications + `GoatHTML` ProgID).
+  On Linux: `makensis -DVERSION=x.y.z installer/goat.nsi`.
+- `npm run appimage` (Linux): `package:linux` then `installer/linux/build-appimage.sh` (AppDir with AppRun that adds
+  `--no-sandbox` only when unprivileged userns are blocked). Tested: AppImage starts with the sandbox on.
+- `website/`: static Cloudflare Pages site (no build step; output directory `website`). Download buttons point at
+  GitHub Releases `latest`.
 - `npm run package:win`: build and package to `dist\Goat Browser-win32-x64\`. Updating an existing install
   usually only needs the new `resources\app.asar` copied over.
-- `fast-build\build-fast.ps1`: Thorium-style AVX2/ThinLTO Electron build (untested, ~120 GB, hours).
 
 ## Layout
 - `src/main.js`: everything in the main process. Sections are marked with `// ---- name` banners:
