@@ -192,7 +192,7 @@ async function checkUpdates(force) {
     if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
     const rel = await res.json();
     const { os } = await chrome.runtime.getPlatformInfo();
-    const want = os === 'linux' ? /^GoatBrowser-.*\.AppImage$/i : /^GoatBrowserSetup.*\.exe$/i;
+    const want = os === 'linux' ? /^GoatBrowser-.*\.AppImage$/i : /^GoatBrowser-[\d.]+-windows-x64\.exe$/i;
     const asset = (rel.assets || []).find((a) => want.test(a.name));
     const next = { lastCheck: Date.now(), latest: rel.tag_name || '', url: (asset && asset.browser_download_url) || rel.html_url || '', page: rel.html_url || '', error: '' };
     const out = await setSetting('updates', next);

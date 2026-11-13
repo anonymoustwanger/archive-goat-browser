@@ -1,4 +1,8 @@
-; Goat Browser (Chromium) setup. Built by .github/workflows/goat-release.yml:
+; Goat Browser (Chromium) package for one version: GoatBrowser-<version>-windows-x64.exe.
+; People normally get it through GoatBrowserSetup.exe (GoatSetup.cs), which lets them
+; pick a version, downloads this file and runs it with /S (silent). Run by hand it
+; shows its own setup screens, so it also works offline.
+; Built by .github/workflows/goat-release.yml:
 ;   makensis -DVERSION=5.0.0 -DSTAGE=<folder> chromium/installer/goat-setup.nsi
 ; <folder> holds mini_installer.exe (Goat's Chromium) and goat\ (extensions, Tor,
 ; helper, startup switches). Installs per user, no admin needed.
@@ -17,7 +21,7 @@ Unicode true
 !define APPDIR "$LOCALAPPDATA\Goat Browser\Application"
 
 Name "Goat Browser"
-OutFile "${STAGE}\GoatBrowserSetup-${VERSION}.exe"
+OutFile "${STAGE}\GoatBrowser-${VERSION}-windows-x64.exe"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 ShowInstDetails nevershow
@@ -66,11 +70,13 @@ Section "Goat Browser"
   ${AndIf} $0 != 3
   ${AndIf} $0 != 4
   ${AndIf} $0 != 30
-    MessageBox MB_ICONSTOP "Goat Browser couldn't be installed (setup error $0).$\r$\nClose Goat if it's open and try again."
+    MessageBox MB_ICONSTOP "Goat Browser couldn't be installed (setup error $0).$\r$\nClose Goat if it's open and try again." /SD IDOK
+    SetErrorLevel 3
     Abort
   ${EndIf}
-  IfFileExists "${APPDIR}\chrome.exe" +3
-    MessageBox MB_ICONSTOP "Goat Browser couldn't be installed: ${APPDIR} is missing."
+  IfFileExists "${APPDIR}\chrome.exe" +4
+    MessageBox MB_ICONSTOP "Goat Browser couldn't be installed: ${APPDIR} is missing." /SD IDOK
+    SetErrorLevel 3
     Abort
 
   SetDetailsPrint textonly

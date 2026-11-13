@@ -15,13 +15,13 @@ Goat 5 is real Chromium (ungoogled-chromium 157), not Electron, so every Chrome 
 - **Privacy profiles:** Fastest / Balanced / Most private, plus single switches.
 - **Update checker:** checks GitHub releases twice a day.
 - **Chromium itself:** profiles (each its own taskbar window), tab groups (folders), private windows, themes and the Web Store.
-- **Installer** with a setup screen. Uninstall from Windows Settings → Apps, or Goat settings → Uninstall.
+- **One installer for every version:** `GoatBrowserSetup.exe` lists the published versions, newest first, and downloads and installs the one you pick. It can also go back to an older version. Uninstall from Windows Settings → Apps, or Goat settings → Uninstall.
 - **Linux:** `GoatBrowser-<version>-x86_64.AppImage` with the same features. Your profile is in `~/.config/goat-browser`.
 
 ## How it's built (GitHub does it all)
 
 1. **Chromium base:** Actions → "Chromium base" → Run workflow. For Linux, also run "Chromium base (Linux)"; both can run at the same time. It compiles Goat's Chromium in stages and takes about a day. When done it publishes a pre-release named `base-<version>`. This is only needed again for a new Chromium version or when `patches/`, `brand.py` or `hook.py` change.
-2. **Goat release:** push a tag like `v5.0.0` (GitHub Desktop: History → right-click the commit → Create Tag, then Push). This takes about 10 minutes. It publishes `GoatBrowserSetup-5.0.0.exe` and `GoatBrowser-5.0.0-x86_64.AppImage` as the latest release.
+2. **Goat release:** push a tag like `v5.0.0` (GitHub Desktop: History → right-click the commit → Create Tag, then Push). This takes about 10 minutes. It publishes `GoatBrowserSetup.exe` (the installer), `GoatBrowser-5.0.0-windows-x64.exe` (that version's package) and `GoatBrowser-5.0.0-x86_64.AppImage` as the latest release.
 
 The repository must be public, because private repositories don't get enough free build minutes.
 
@@ -37,7 +37,8 @@ The repository must be public, because private repositories don't get enough fre
 | `linux/` | The AppImage launcher, desktop entry and startup switches. |
 | `host/GoatHost.cs` | goat-host.exe, which runs Tor, opens Tor windows, saves startup switches and starts the uninstaller. |
 | `scripts/fetch-tor.sh` | Downloads the Tor Expert Bundle and checks its signature. |
-| `installer/goat-setup.nsi` | The setup screen. It runs Chromium's installer, then adds `goat\`. |
+| `installer/GoatSetup.cs` | GoatBrowserSetup.exe, the installer with the version list. |
+| `installer/goat-setup.nsi` | One version's package. It runs Chromium's installer, then adds `goat\`. |
 | `switches.txt`, `settings.switches`, `initial_preferences`, `host-manifest.json` | Shipped settings. |
 
 ## Install layout

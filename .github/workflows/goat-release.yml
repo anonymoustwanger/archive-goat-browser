@@ -1,7 +1,9 @@
 # Packages Goat Browser for Windows and Linux: Goat's Chromium (from the newest
 # "base-*" / "base-linux-*" pre-releases, made by the Chromium base workflows) + the Goat extension, uBlock Origin Lite, Tor and
-# the Goat helper, into GoatBrowserSetup-<version>.exe and
-# GoatBrowser-<version>-x86_64.AppImage. Takes about 10 minutes.
+# the Goat helper. Takes about 10 minutes. Each release gets:
+#   GoatBrowserSetup.exe                      the installer: pick a version, it downloads and installs it
+#   GoatBrowser-<version>-windows-x64.exe     that version's package (what the installer downloads)
+#   GoatBrowser-<version>-x86_64.AppImage     Linux
 #
 # Release: push a tag like v5.0.0 (GitHub Desktop: Repository > Create tag, then
 # push). Or run it from the Actions tab to just get the installer as an artifact.
@@ -96,7 +98,7 @@ jobs:
           cp chromium/initial_preferences "$s/"
           find "$s" -maxdepth 3 | sort
 
-      - name: Build the installer
+      - name: Build the package
         shell: pwsh
         run: |
           $nsis = Get-Command makensis -ErrorAction SilentlyContinue
@@ -108,11 +110,22 @@ jobs:
           & $nsis /V2 "/DVERSION=$env:VERSION" "/DSTAGE=$env:STAGE" chromium\installer\goat-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Upload installer
+      - name: Build the installer (version picker)
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /langversion:5 /target:winexe /optimize+ /win32icon:chromium\installer\goat.ico `
+            /out:"$env:STAGE\GoatBrowserSetup.exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll `
+            chromium\installer\GoatSetup.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload Windows files
         uses: actions/upload-artifact@v7
         with:
-          name: GoatBrowserSetup-${{ env.VERSION }}
-          path: ${{ env.STAGE }}\GoatBrowserSetup-${{ env.VERSION }}.exe
+          name: GoatBrowser-${{ env.VERSION }}-windows
+          path: |
+            ${{ env.STAGE }}\GoatBrowser-${{ env.VERSION }}-windows-x64.exe
+            ${{ env.STAGE }}\GoatBrowserSetup.exe
 
   linux:
     runs-on: ubuntu-latest
@@ -213,5 +226,5 @@ jobs:
             gh release upload "$tag" files/* --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$tag" files/* --repo "$GITHUB_REPOSITORY" --title "Goat Browser $v" \
-              --notes "Goat Browser $v, built on Chromium. Windows: download GoatBrowserSetup-$v.exe and run it. Linux: download GoatBrowser-$v-x86_64.AppImage, make it executable and open it."
+              --notes "Goat Browser $v, built on Chromium. Windows: download GoatBrowserSetup.exe and run it. Linux: download GoatBrowser-$v-x86_64.AppImage, make it executable and open it."
           fi
