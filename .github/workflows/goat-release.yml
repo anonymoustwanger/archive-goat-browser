@@ -112,12 +112,7 @@ jobs:
 
       - name: Build the installer (version picker)
         shell: pwsh
-        run: |
-          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          & $csc /nologo /langversion:5 /target:winexe /optimize+ /win32icon:chromium\installer\goat.ico `
-            /out:"$env:STAGE\GoatBrowserSetup.exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll `
-            chromium\installer\GoatSetup.cs
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+        run: chromium/installer/build-setup.ps1 -Out $env:STAGE
 
       - name: Upload Windows files
         uses: actions/upload-artifact@v7

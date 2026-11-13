@@ -37,7 +37,7 @@ The repository must be public, because private repositories don't get enough fre
 | `linux/` | The AppImage launcher, desktop entry and startup switches. |
 | `host/GoatHost.cs` | goat-host.exe, which runs Tor, opens Tor windows, saves startup switches and starts the uninstaller. |
 | `scripts/fetch-tor.sh` | Downloads the Tor Expert Bundle and checks its signature. |
-| `installer/GoatSetup.cs` | GoatBrowserSetup.exe, the installer with the version list. |
+| `installer/GoatSetup.cs`, `installer/ui/` | GoatBrowserSetup.exe: Goat's setup screen (WebView2) with the version list. `build-setup.ps1` builds it. |
 | `installer/goat-setup.nsi` | One version's package. It runs Chromium's installer, then adds `goat\`. |
 | `switches.txt`, `settings.switches`, `initial_preferences`, `host-manifest.json` | Shipped settings. |
 

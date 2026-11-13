@@ -1,9 +1,13 @@
-// GoatBrowserSetup.exe: the one Goat Browser installer (C# 5, .NET Framework 4.5+, WinForms).
+// GoatBrowserSetup.exe: the one Goat Browser installer (C# 5, .NET Framework 4.6.2+).
 //
-// It lists the Goat versions published on GitHub, lets you pick one (newest by
-// default), downloads that version's package (GoatBrowser-<version>-windows-x64.exe),
-// checks it, and installs it. The same file works for every version, so
+// It lists the Goat versions published on GitHub (newest first), downloads the
+// chosen version's package (GoatBrowser-<version>-windows-x64.exe), checks it and
+// installs it silently. The same file works for every version, so
 // releases/latest/download/GoatBrowserSetup.exe is a permanent download link.
+//
+// The screen is Goat's own setup UI (ui\*.html, shown in WebView2, which comes
+// with Windows 10 and 11). Without WebView2 it falls back to a plain window.
+// WebView2's DLLs and the UI are embedded in the exe and unpacked to %TEMP%.
 
 using System;
 using System.Collections;
@@ -13,14 +17,17 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyTitle("Goat Browser setup")]
-[assembly: System.Reflection.AssemblyProduct("Goat Browser")]
-[assembly: System.Reflection.AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyTitle("Goat Browser setup")]
+[assembly: AssemblyProduct("Goat Browser")]
+[assembly: AssemblyVersion("1.1.0.0")]
 
 namespace Goat
 {
@@ -29,94 +36,25 @@ namespace Goat
         public string Version;
         public string Url;
         public long Size;
-        public string Sha256; // may be empty
+        public string Sha256; // empty when GitHub didn't give one
         public bool Latest;
 
-        public override string ToString()
-        {
-            return "Goat " + Version + (Latest ? "  (newest)" : "");
-        }
+        public override string ToString() { return "Goat " + Version + (Latest ? "  (newest)" : ""); }
     }
 
-    class SetupForm : Form
+    // ------------------------------------------------------------------ engine
+    // Finding, downloading and installing versions. Callbacks run on the UI thread.
+    class Engine
     {
         const string Repo = "anonymoustwanger/goat-browser";
         static readonly Regex Package = new Regex("^GoatBrowser-(\\d+\\.\\d+\\.\\d+)-windows-x64\\.exe$", RegexOptions.IgnoreCase);
-        static readonly string AppDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Goat Browser", "Application");
+        public static readonly string AppDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Goat Browser", "Application");
 
-        readonly Label title = new Label();
-        readonly Label status = new Label();
-        readonly Label note = new Label();
-        readonly Label versionLabel = new Label();
-        readonly ComboBox versions = new ComboBox();
-        readonly ProgressBar bar = new ProgressBar();
-        readonly Button action = new Button();
-        readonly Button close = new Button();
-
-        string installed;
-        string tempFile;
+        public List<Release> Versions = new List<Release>();
         WebClient download;
-        enum Mode { Loading, Ready, Working, Done, Failed }
-        Mode mode = Mode.Loading;
+        string tempFile;
 
-        public SetupForm()
-        {
-            Text = "Goat Browser setup";
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
-            StartPosition = FormStartPosition.CenterScreen;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            Font = new Font("Segoe UI", 9.75f);
-            BackColor = Color.White;
-            ForeColor = Color.FromArgb(17, 17, 17);
-            ClientSize = new Size(480, 330);
-            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-
-            title.Text = "Install Goat Browser";
-            title.Font = new Font("Segoe UI", 18f, FontStyle.Bold);
-            title.SetBounds(28, 22, 424, 40);
-
-            Label about = new Label();
-            about.Text = "A private, fast browser built on Chromium. Installs just for you, no admin rights needed.";
-            about.ForeColor = Color.FromArgb(95, 99, 104);
-            about.SetBounds(30, 66, 420, 40);
-
-            versionLabel.Text = "Version";
-            versionLabel.SetBounds(30, 118, 420, 20);
-            versions.DropDownStyle = ComboBoxStyle.DropDownList;
-            versions.SetBounds(30, 140, 420, 28);
-            versions.Enabled = false;
-            versions.SelectedIndexChanged += delegate { ShowChoice(); };
-
-            note.ForeColor = Color.FromArgb(95, 99, 104);
-            note.SetBounds(30, 176, 420, 40);
-
-            bar.SetBounds(30, 222, 420, 10);
-            bar.Visible = false;
-            status.SetBounds(30, 236, 420, 38);
-            status.Text = "Looking for versions…";
-
-            action.Text = "Install";
-            action.SetBounds(240, 278, 130, 34);
-            action.FlatStyle = FlatStyle.Flat;
-            action.BackColor = Color.FromArgb(17, 17, 17);
-            action.ForeColor = Color.White;
-            action.Enabled = false;
-            action.Click += delegate { OnAction(); };
-            close.Text = "Close";
-            close.SetBounds(380, 278, 70, 34);
-            close.FlatStyle = FlatStyle.Flat;
-            close.Click += delegate { Close(); };
-            AcceptButton = action;
-
-            Controls.AddRange(new Control[] { title, about, versionLabel, versions, note, bar, status, action, close });
-            installed = InstalledVersion();
-            Shown += delegate { LoadVersions(); };
-            FormClosing += OnClosing;
-        }
-
-        // ------------------------------------------------------------ state
-        static string InstalledVersion()
+        public static string InstalledVersion()
         {
             try
             {
@@ -128,62 +66,17 @@ namespace Goat
             catch { return null; }
         }
 
-        static int Compare(string a, string b)
+        public static int Compare(string a, string b)
         {
             try { return new Version(a).CompareTo(new Version(b)); } catch { return string.CompareOrdinal(a, b); }
         }
 
-        void ShowChoice()
+        public Release Find(string version)
         {
-            Release r = versions.SelectedItem as Release;
-            if (r == null || mode != Mode.Ready) return;
-            string mb = (r.Size / 1048576.0).ToString("0") + " MB download.";
-            if (installed == null)
-            {
-                action.Text = "Install";
-                note.Text = mb;
-            }
-            else
-            {
-                int c = Compare(r.Version, installed);
-                action.Text = c > 0 ? "Update" : c == 0 ? "Reinstall" : "Go back";
-                note.Text = "You have Goat " + installed + ". " + mb +
-                    (c < 0 ? " Going back to an older version can reset your browsing data." : " Your profile is kept.");
-            }
+            foreach (Release r in Versions) if (r.Version == version) return r;
+            return null;
         }
 
-        void Fail(string message)
-        {
-            mode = Mode.Failed;
-            bar.Visible = false;
-            status.ForeColor = Color.FromArgb(198, 40, 40);
-            status.Text = message;
-            action.Text = "Try again";
-            action.Enabled = true;
-            versions.Enabled = versions.Items.Count > 0;
-        }
-
-        void OnAction()
-        {
-            if (mode == Mode.Done)
-            {
-                try { Process.Start(Path.Combine(AppDir, "chrome.exe")); } catch { }
-                Close();
-            }
-            else if (mode == Mode.Failed && versions.Items.Count == 0) LoadVersions();
-            else if (mode == Mode.Ready || mode == Mode.Failed) StartInstall();
-        }
-
-        void OnClosing(object sender, FormClosingEventArgs e)
-        {
-            if (mode == Mode.Working)
-            {
-                if (download == null) { e.Cancel = true; return; } // installing: let it finish
-                download.CancelAsync();
-            }
-        }
-
-        // --------------------------------------------------------- versions
         static WebClient NewClient()
         {
             WebClient c = new WebClient();
@@ -192,26 +85,24 @@ namespace Goat
             return c;
         }
 
-        void LoadVersions()
+        public void LoadVersions(Action ok, Action<string> fail)
         {
-            mode = Mode.Loading;
-            status.ForeColor = ForeColor;
-            status.Text = "Looking for versions…";
-            action.Enabled = false;
             WebClient c = NewClient();
             c.DownloadStringCompleted += delegate(object s, DownloadStringCompletedEventArgs e)
             {
                 c.Dispose();
-                if (e.Error != null) { Fail("Couldn't reach GitHub. Check your connection."); return; }
-                try { FillVersions(e.Result); }
-                catch (Exception) { Fail("Couldn't read the version list from GitHub."); }
+                if (e.Error != null) { fail("Couldn't reach GitHub to get the list of versions. Check your connection."); return; }
+                string why;
+                try { why = Parse(e.Result); }
+                catch (Exception) { why = "Couldn't read the version list from GitHub."; }
+                if (why != null) fail(why); else ok();
             };
             // GOAT_SETUP_API: a different release list, for testing.
             string api = Environment.GetEnvironmentVariable("GOAT_SETUP_API");
             c.DownloadStringAsync(new Uri(string.IsNullOrEmpty(api) ? "https://api.github.com/repos/" + Repo + "/releases?per_page=50" : api));
         }
 
-        void FillVersions(string json)
+        string Parse(string json)
         {
             JavaScriptSerializer js = new JavaScriptSerializer();
             js.MaxJsonLength = int.MaxValue;
@@ -235,103 +126,83 @@ namespace Goat
                     found.Add(r);
                 }
             }
-            if (found.Count == 0) { Fail("No Goat versions are published yet."); return; }
+            if (found.Count == 0) return "No Goat versions are published yet. Try again later.";
             found.Sort(delegate(Release x, Release y) { return Compare(y.Version, x.Version); });
             found[0].Latest = true;
-            versions.Items.Clear();
-            foreach (Release r in found) versions.Items.Add(r);
-            mode = Mode.Ready;
-            versions.SelectedIndex = 0;
-            versions.Enabled = true;
-            action.Enabled = true;
-            status.Text = "";
-            ShowChoice();
+            Versions = found;
+            return null;
         }
 
-        // ---------------------------------------------------------- install
-        void StartInstall()
+        // progress(step, percent 0-100)
+        public void Install(Release r, bool desktop, bool makeDefault, Action<string, int> progress, Action ok, Action<string> fail)
         {
-            Release r = versions.SelectedItem as Release;
-            if (r == null) return;
+            string installed = InstalledVersion();
             bool goingBack = installed != null && Compare(r.Version, installed) < 0;
-            if (goingBack)
-            {
-                if (MessageBox.Show(this, "Go back from Goat " + installed + " to " + r.Version + "?\r\n\r\nOlder versions may not open a newer profile, so your bookmarks, history and logins can be reset. Export your bookmarks first if you need them.",
-                        "Goat Browser setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
-                while (GoatRunning())
-                {
-                    if (MessageBox.Show(this, "Close all Goat Browser windows, then click OK.", "Goat Browser setup",
-                            MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
-                }
-            }
+            if (goingBack && GoatRunning()) { fail("Close all Goat Browser windows, then click Try again."); return; }
 
-            mode = Mode.Working;
-            status.ForeColor = ForeColor;
-            action.Enabled = false;
-            versions.Enabled = false;
-            bar.Style = ProgressBarStyle.Continuous;
-            bar.Value = 0;
-            bar.Visible = true;
-            status.Text = "Downloading Goat " + r.Version + "…";
             tempFile = Path.Combine(Path.GetTempPath(), "GoatBrowser-" + r.Version + "-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".exe");
-
+            progress("Downloading Goat " + r.Version + "…", 0);
             download = NewClient();
             download.DownloadProgressChanged += delegate(object s, DownloadProgressChangedEventArgs e)
             {
                 long total = e.TotalBytesToReceive > 0 ? e.TotalBytesToReceive : r.Size;
-                if (total > 0) bar.Value = (int)Math.Min(100, e.BytesReceived * 100 / total);
-                status.Text = "Downloading Goat " + r.Version + "…  " + (e.BytesReceived / 1048576) + " of " + (total / 1048576) + " MB";
+                int pct = total > 0 ? (int)Math.Min(100, e.BytesReceived * 100 / total) : 0;
+                progress("Downloading Goat " + r.Version + "…  " + (e.BytesReceived / 1048576) + " of " + (total / 1048576) + " MB", pct * 80 / 100);
             };
             download.DownloadFileCompleted += delegate(object s, AsyncCompletedEventArgs e)
             {
                 download.Dispose();
                 download = null;
                 if (e.Cancelled) { Cleanup(); return; }
-                if (e.Error != null) { Cleanup(); Fail("The download failed. Check your connection."); return; }
-                RunInstall(r, goingBack);
+                if (e.Error != null) { Cleanup(); fail("The download stopped. Check your connection and try again."); return; }
+                progress("Installing Goat " + r.Version + "…", 85);
+                RunPackage(r, goingBack, desktop, makeDefault, progress, ok, fail);
             };
             download.DownloadFileAsync(new Uri(r.Url), tempFile);
         }
 
-        void RunInstall(Release r, bool goingBack)
+        void RunPackage(Release r, bool goingBack, bool desktop, bool makeDefault, Action<string, int> progress, Action ok, Action<string> fail)
         {
-            bar.Style = ProgressBarStyle.Marquee;
-            status.Text = "Installing Goat " + r.Version + "…";
             BackgroundWorker w = new BackgroundWorker();
             w.DoWork += delegate(object s, DoWorkEventArgs e)
             {
                 FileInfo info = new FileInfo(tempFile);
-                if (r.Size > 0 && info.Length != r.Size) { e.Result = "The download was incomplete."; return; }
+                if (r.Size > 0 && info.Length != r.Size) { e.Result = "The download was incomplete. Try again."; return; }
                 if (r.Sha256.Length > 0 && Sha256(tempFile) != r.Sha256) { e.Result = "The download didn't match the published file, so it wasn't installed."; return; }
-                if (goingBack) RemoveNewer();
+                if (goingBack) RemoveInstalled();
                 ProcessStartInfo psi = new ProcessStartInfo(tempFile, "/S");
                 psi.UseShellExecute = false;
                 using (Process p = Process.Start(psi))
                 {
                     p.WaitForExit();
-                    e.Result = p.ExitCode == 0 ? null : "Setup couldn't finish (error " + p.ExitCode + "). Close Goat if it's open and try again.";
+                    if (p.ExitCode != 0) { e.Result = "Setup couldn't finish (error " + p.ExitCode + "). Close Goat if it's open and try again."; return; }
                 }
+                string shortcut = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Goat Browser.lnk");
+                if (!desktop) { try { File.Delete(shortcut); } catch { } }
+                e.Result = null;
             };
             w.RunWorkerCompleted += delegate(object s, RunWorkerCompletedEventArgs e)
             {
                 Cleanup();
                 string error = e.Error != null ? "Setup couldn't start: " + e.Error.Message : e.Result as string;
-                if (error != null) { Fail(error); return; }
-                mode = Mode.Done;
-                installed = r.Version;
-                bar.Visible = false;
-                status.ForeColor = Color.FromArgb(26, 127, 55);
-                status.Text = "Goat " + r.Version + " is installed.";
-                note.Text = "You'll find Goat in the Start menu and on your desktop.";
-                action.Text = "Open Goat";
-                action.Enabled = true;
+                if (error != null) { fail(error); return; }
+                progress("Done", 100);
+                if (makeDefault) { try { Process.Start("ms-settings:defaultapps"); } catch { } }
+                ok();
             };
             w.RunWorkerAsync();
         }
 
-        // Chromium's own setup refuses to install over a newer version, so
-        // remove the newer one first (profiles are kept).
-        static void RemoveNewer()
+        public bool Busy { get { return download != null; } }
+
+        public void Cancel()
+        {
+            if (download != null) download.CancelAsync();
+        }
+
+        // Chromium's own setup won't install over a newer version, so remove the
+        // installed one first (the profile in User Data is kept).
+        static void RemoveInstalled()
         {
             try
             {
@@ -348,7 +219,7 @@ namespace Goat
             catch { }
         }
 
-        static bool GoatRunning()
+        public static bool GoatRunning()
         {
             string prefix = AppDir.TrimEnd('\\') + "\\";
             foreach (Process p in Process.GetProcessesByName("chrome"))
@@ -358,6 +229,11 @@ namespace Goat
                 finally { p.Dispose(); }
             }
             return false;
+        }
+
+        public static void Launch()
+        {
+            try { Process.Start(Path.Combine(AppDir, "chrome.exe")); } catch { }
         }
 
         static string Sha256(string file)
@@ -371,15 +247,365 @@ namespace Goat
         {
             try { if (tempFile != null && File.Exists(tempFile)) File.Delete(tempFile); } catch { }
         }
+    }
+
+    // ----------------------------------------------------------- Goat's UI
+    class WebSetupForm : Form
+    {
+        readonly Engine engine = new Engine();
+        readonly string uiDir;
+        readonly string dataDir;
+        Microsoft.Web.WebView2.WinForms.WebView2 web;
+        bool installing;
+
+        [DllImport("user32.dll")] static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        public WebSetupForm(string uiDir, string dataDir)
+        {
+            this.uiDir = uiDir;
+            this.dataDir = dataDir;
+            Text = "Goat Browser setup";
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterScreen;
+            BackColor = Program.Dark() ? Color.FromArgb(16, 18, 20) : Color.FromArgb(238, 240, 243);
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            float scale;
+            using (Graphics g = CreateGraphics()) scale = g.DpiX / 96f;
+            ClientSize = new Size((int)(640 * scale), (int)(460 * scale));
+
+            web = new Microsoft.Web.WebView2.WinForms.WebView2();
+            web.Dock = DockStyle.Fill;
+            web.DefaultBackgroundColor = BackColor;
+            Controls.Add(web);
+            Load += async delegate
+            {
+                try
+                {
+                    Microsoft.Web.WebView2.Core.CoreWebView2Environment env =
+                        await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, dataDir, null);
+                    await web.EnsureCoreWebView2Async(env);
+                    Microsoft.Web.WebView2.Core.CoreWebView2 core = web.CoreWebView2;
+                    core.Settings.AreDevToolsEnabled = false;
+                    core.Settings.AreDefaultContextMenusEnabled = false;
+                    core.Settings.IsZoomControlEnabled = false;
+                    core.Settings.IsStatusBarEnabled = false;
+                    core.Settings.AreBrowserAcceleratorKeysEnabled = false;
+                    core.SetVirtualHostNameToFolderMapping("setup.goat", uiDir, Microsoft.Web.WebView2.Core.CoreWebView2HostResourceAccessKind.Allow);
+                    core.WebMessageReceived += OnMessage;
+                    core.NewWindowRequested += delegate(object s, Microsoft.Web.WebView2.Core.CoreWebView2NewWindowRequestedEventArgs e) { e.Handled = true; };
+                    core.Navigate("https://setup.goat/index.html");
+                }
+                catch (Exception e)
+                {
+                    MessageBox.Show(this, "Goat setup couldn't open its window: " + e.Message, "Goat Browser setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Close();
+                }
+            };
+            FormClosing += delegate(object s, FormClosingEventArgs e)
+            {
+                if (installing && !engine.Busy) { e.Cancel = true; return; } // the install itself must finish
+                engine.Cancel();
+            };
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ClassStyle |= 0x20000; // drop shadow
+                cp.Style |= 0x20000;      // minimize box (taskbar click minimizes)
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            int round = 2; // Windows 11 rounded corners
+            try { DwmSetWindowAttribute(Handle, 33, ref round, 4); } catch { }
+        }
+
+        void Post(Dictionary<string, object> msg)
+        {
+            if (web.CoreWebView2 != null) web.CoreWebView2.PostWebMessageAsString(new JavaScriptSerializer().Serialize(msg));
+        }
+
+        static Dictionary<string, object> Msg(string type)
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            d["type"] = type;
+            return d;
+        }
+
+        void Error(string message)
+        {
+            installing = false;
+            Dictionary<string, object> m = Msg("error");
+            m["message"] = message;
+            Post(m);
+        }
+
+        void OnMessage(object sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
+        {
+            Dictionary<string, object> m;
+            try { m = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(e.TryGetWebMessageAsString()); }
+            catch { return; }
+            object t;
+            string type = m.TryGetValue("type", out t) ? Convert.ToString(t) : "";
+            switch (type)
+            {
+                case "drag":
+                    ReleaseCapture();
+                    SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero); // WM_NCLBUTTONDOWN, HTCAPTION
+                    break;
+                case "minimize":
+                    WindowState = FormWindowState.Minimized;
+                    break;
+                case "close":
+                    Close();
+                    break;
+                case "launch":
+                    Engine.Launch();
+                    Close();
+                    break;
+                case "versions":
+                    engine.LoadVersions(SendVersions, Error);
+                    break;
+                case "install":
+                {
+                    Release r = engine.Find(Convert.ToString(m["version"]));
+                    if (r == null) { Error("That version isn't available any more."); break; }
+                    installing = true;
+                    engine.Install(r, Equals(m["desktop"], true), Equals(m["makeDefault"], true),
+                        delegate(string step, int pct)
+                        {
+                            Dictionary<string, object> p = Msg("progress");
+                            p["step"] = step;
+                            p["pct"] = pct;
+                            Post(p);
+                        },
+                        delegate
+                        {
+                            installing = false;
+                            Dictionary<string, object> d = Msg("done");
+                            d["version"] = r.Version;
+                            Post(d);
+                        },
+                        Error);
+                    break;
+                }
+            }
+        }
+
+        void SendVersions()
+        {
+            Dictionary<string, object> m = Msg("versions");
+            m["installed"] = Engine.InstalledVersion();
+            List<object> list = new List<object>();
+            foreach (Release r in engine.Versions)
+            {
+                Dictionary<string, object> v = new Dictionary<string, object>();
+                v["version"] = r.Version;
+                v["size"] = r.Size;
+                v["latest"] = r.Latest;
+                list.Add(v);
+            }
+            m["versions"] = list;
+            Post(m);
+        }
+    }
+
+    // ------------------------------------------------- plain fallback window
+    class PlainSetupForm : Form
+    {
+        readonly Engine engine = new Engine();
+        readonly Label status = new Label();
+        readonly Label note = new Label();
+        readonly ComboBox versions = new ComboBox();
+        readonly ProgressBar bar = new ProgressBar();
+        readonly Button action = new Button();
+        string installed = Engine.InstalledVersion();
+        bool done;
+        bool working;
+
+        public PlainSetupForm()
+        {
+            Text = "Goat Browser setup";
+            FormBorderStyle = FormBorderStyle.FixedSingle;
+            MaximizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            Font = new Font("Segoe UI", 9.75f);
+            BackColor = Color.White;
+            ClientSize = new Size(480, 300);
+            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+            Label title = new Label();
+            title.Text = "Install Goat Browser";
+            title.Font = new Font("Segoe UI", 18f, FontStyle.Bold);
+            title.SetBounds(28, 20, 424, 40);
+            Label label = new Label();
+            label.Text = "Version";
+            label.SetBounds(30, 74, 420, 20);
+            versions.DropDownStyle = ComboBoxStyle.DropDownList;
+            versions.SetBounds(30, 96, 420, 28);
+            versions.Enabled = false;
+            versions.SelectedIndexChanged += delegate { Describe(); };
+            note.ForeColor = Color.DimGray;
+            note.SetBounds(30, 132, 420, 40);
+            bar.SetBounds(30, 180, 420, 10);
+            bar.Visible = false;
+            status.SetBounds(30, 196, 420, 38);
+            status.Text = "Looking for versions…";
+            action.Text = "Install";
+            action.SetBounds(240, 248, 130, 34);
+            action.Enabled = false;
+            action.Click += delegate { OnAction(); };
+            Button close = new Button();
+            close.Text = "Close";
+            close.SetBounds(380, 248, 70, 34);
+            close.Click += delegate { Close(); };
+            Controls.AddRange(new Control[] { title, label, versions, note, bar, status, action, close });
+            Shown += delegate { Reload(); };
+            FormClosing += delegate(object s, FormClosingEventArgs e) { if (working && !engine.Busy) e.Cancel = true; else engine.Cancel(); };
+        }
+
+        void Reload()
+        {
+            status.Text = "Looking for versions…";
+            engine.LoadVersions(delegate
+            {
+                versions.Items.Clear();
+                foreach (Release r in engine.Versions) versions.Items.Add(r);
+                versions.SelectedIndex = 0;
+                versions.Enabled = true;
+                action.Enabled = true;
+                status.Text = "";
+                Describe();
+            }, Fail);
+        }
+
+        void Describe()
+        {
+            Release r = versions.SelectedItem as Release;
+            if (r == null || working) return;
+            if (installed == null) { action.Text = "Install"; note.Text = (r.Size / 1048576) + " MB download."; return; }
+            int c = Engine.Compare(r.Version, installed);
+            action.Text = c > 0 ? "Update" : c == 0 ? "Reinstall" : "Go back";
+            note.Text = "You have Goat " + installed + "." + (c < 0 ? " Older versions may reset your browsing data. Close Goat first." : " Your profile is kept.");
+        }
+
+        void Fail(string message)
+        {
+            working = false;
+            bar.Visible = false;
+            status.ForeColor = Color.Firebrick;
+            status.Text = message;
+            action.Text = "Try again";
+            action.Enabled = true;
+            versions.Enabled = versions.Items.Count > 0;
+        }
+
+        void OnAction()
+        {
+            if (done) { Engine.Launch(); Close(); return; }
+            if (versions.Items.Count == 0) { Reload(); return; }
+            Release r = versions.SelectedItem as Release;
+            if (r == null) return;
+            working = true;
+            action.Enabled = false;
+            versions.Enabled = false;
+            status.ForeColor = ForeColor;
+            bar.Visible = true;
+            engine.Install(r, true, false,
+                delegate(string step, int pct) { status.Text = step; bar.Value = Math.Max(0, Math.Min(100, pct)); },
+                delegate
+                {
+                    working = false;
+                    done = true;
+                    installed = r.Version;
+                    bar.Visible = false;
+                    status.ForeColor = Color.SeaGreen;
+                    status.Text = "Goat " + r.Version + " is installed.";
+                    action.Text = "Open Goat";
+                    action.Enabled = true;
+                },
+                Fail);
+        }
+    }
+
+    // ------------------------------------------------------------- startup
+    static class Program
+    {
+        static string unpackDir;
+
+        [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+
+        public static bool Dark()
+        {
+            try
+            {
+                object v = Microsoft.Win32.Registry.GetValue("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", "AppsUseLightTheme", 1);
+                return v is int && (int)v == 0;
+            }
+            catch { return true; }
+        }
+
+        // Unpacks the embedded UI and WebView2 files into %TEMP%\GoatSetup-<version>.
+        static void Unpack()
+        {
+            Assembly me = Assembly.GetExecutingAssembly();
+            unpackDir = Path.Combine(Path.GetTempPath(), "GoatSetup-" + me.GetName().Version);
+            foreach (string name in me.GetManifestResourceNames())
+            {
+                // Resource names: "ui/<file>" or "lib/<file>"
+                string target = Path.Combine(unpackDir, name.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                using (Stream src = me.GetManifestResourceStream(name))
+                {
+                    if (File.Exists(target) && new FileInfo(target).Length == src.Length && !name.StartsWith("ui/")) continue; // DLL may be in use by another copy
+                    using (FileStream dst = File.Create(target)) src.CopyTo(dst);
+                }
+            }
+            AppDomain.CurrentDomain.AssemblyResolve += delegate(object s, ResolveEventArgs e)
+            {
+                string file = Path.Combine(unpackDir, "lib", new AssemblyName(e.Name).Name + ".dll");
+                return File.Exists(file) ? Assembly.LoadFrom(file) : null;
+            };
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static bool WebView2Ready()
+        {
+            try
+            {
+                Microsoft.Web.WebView2.Core.CoreWebView2Environment.SetLoaderDllFolderPath(Path.Combine(unpackDir, "lib"));
+                return !string.IsNullOrEmpty(Microsoft.Web.WebView2.Core.CoreWebView2Environment.GetAvailableBrowserVersionString());
+            }
+            catch { return false; }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static Form WebForm()
+        {
+            return new WebSetupForm(Path.Combine(unpackDir, "ui"), Path.Combine(unpackDir, "webview-data"));
+        }
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             try { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)12288; } // TLS 1.2 + 1.3
             catch (NotSupportedException) { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; }
+            try { SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new SetupForm());
+
+            bool plain = Array.IndexOf(args, "--plain") >= 0;
+            try { Unpack(); } catch { plain = true; }
+            Application.Run(!plain && WebView2Ready() ? WebForm() : new PlainSetupForm());
         }
     }
 }
