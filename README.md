@@ -1,7 +1,5 @@
 # Goat Browser
 
-> **Goat 5 is moving to real Chromium** (full Chrome extension support). See [chromium/README.md](chromium/README.md). The Electron version below (4.x) still works until Goat 5 is released.
-
 A private, fast browser built on Chromium 156 via Electron 45.
 
 **What it's built on:** Electron bundles Chromium (Chrome's open-source engine: Blink for rendering, V8 for JavaScript) plus Node.js. Goat's own code is the toolbar, tabs, folders, settings, ad blocker wiring and privacy rules. Google's services (sync, Safe Browsing, telemetry) are not included.

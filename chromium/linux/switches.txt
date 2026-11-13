@@ -1,3 +1,0 @@
-# Goat Browser startup switches, read by Goat at every start.
-# {goat} is this folder. Goat settings are in ~/.config/goat-browser/settings.switches.
---load-extension={goat}/ext/goat,{goat}/ext/ubol

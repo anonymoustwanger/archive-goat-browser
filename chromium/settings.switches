@@ -1,6 +1,0 @@
-# Written by Goat settings. Read at startup.
---fingerprinting-canvas-image-data-noise
---fingerprinting-client-rects-noise
---fingerprinting-canvas-measuretext-noise
---no-pings
---enable-features=SpoofWebGLInfo
