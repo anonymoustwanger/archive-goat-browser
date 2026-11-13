@@ -1,0 +1,364 @@
+# Builds Goat's Chromium for Linux x64 (ungoogled-chromium-portablelinux + Goat
+# branding and patches) in up to 10 stages of ~5 hours, then publishes it as the
+# pre-release "base-linux-<chromium version>". goat-release.yml turns it into
+# the Goat AppImage.
+#
+# Run it from the Actions tab: "Chromium base (Linux)" > Run workflow.
+name: Chromium base (Linux)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ucl_ref:
+        description: ungoogled-chromium-portablelinux tag to build (Chromium version)
+        required: true
+        default: '156.0.8078.79-1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chromium-base-linux
+  cancel-in-progress: false
+
+env:
+  ARCH: x86_64
+  UCL_REF: ${{ inputs.ucl_ref }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build the build image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          file: ./docker/build.Dockerfile
+          tags: chromium-builder:trixie-slim
+          outputs: type=docker,dest=/tmp/chromium-builder.tar
+      - name: Upload the build image
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ env.ARCH }}
+          path: /tmp/chromium-builder.tar
+          retention-days: 1
+      - name: Prepare the source (patch + brand)
+        uses: ./.github/actions/build
+        with:
+          prepare-only: true
+          use-existing-image: true
+
+  build_01:
+    runs-on: ubuntu-latest
+    needs: prep
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 1)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_02:
+    runs-on: ubuntu-latest
+    needs: build_01
+    if: needs.build_01.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 2)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_03:
+    runs-on: ubuntu-latest
+    needs: build_02
+    if: needs.build_02.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 3)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_04:
+    runs-on: ubuntu-latest
+    needs: build_03
+    if: needs.build_03.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 4)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_05:
+    runs-on: ubuntu-latest
+    needs: build_04
+    if: needs.build_04.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 5)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_06:
+    runs-on: ubuntu-latest
+    needs: build_05
+    if: needs.build_05.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 6)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_07:
+    runs-on: ubuntu-latest
+    needs: build_06
+    if: needs.build_06.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 7)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_08:
+    runs-on: ubuntu-latest
+    needs: build_07
+    if: needs.build_07.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 8)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_09:
+    runs-on: ubuntu-latest
+    needs: build_08
+    if: needs.build_08.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 9)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true }
+
+  build_10:
+    runs-on: ubuntu-latest
+    needs: build_09
+    if: needs.build_09.outputs.status == 'running'
+    outputs:
+      status: ${{ steps.build.outputs.status }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Build (stage 10)
+        id: build
+        uses: ./.github/actions/build
+        with: { use-existing-image: true, final: true }
+
+  package:
+    runs-on: ubuntu-latest
+    needs: build_10
+    if: ${{ !cancelled() && !failure() && contains(fromJSON('["success", "skipped"]'), needs.build_10.result) }}
+    steps:
+      - name: Get ungoogled-chromium-portablelinux
+        uses: actions/checkout@v7
+        with:
+          repository: ungoogled-software/ungoogled-chromium-portablelinux
+          ref: ${{ env.UCL_REF }}
+          submodules: true
+      - name: Get Goat
+        uses: actions/checkout@v7
+        with:
+          path: goat-src
+          sparse-checkout: chromium
+      - name: Add Goat to the build
+        run: python3 goat-src/chromium/hook_linux.py .
+      - name: Package
+        uses: ./.github/actions/package
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: package
+    steps:
+      - name: Download the build
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ungoogled-chromium-*-linux
+          path: base
+          merge-multiple: true
+      - name: Publish as a pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          ls -la base
+          tarball=$(ls base/*_linux.tar.xz | head -1)
+          version=$(basename "$tarball" | sed -E 's/^ungoogled-chromium-([0-9.]+-[0-9.]+)-.*/\1/')
+          mv "$tarball" base/goat-chromium-linux.tar.xz
+          tag="base-linux-$version"
+          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "Chromium base for Linux $version" \
+            --notes "Goat's Chromium $version for Linux. Used by the Goat release workflow; download Goat itself from the latest release." \
+            base/goat-chromium-linux.tar.xz

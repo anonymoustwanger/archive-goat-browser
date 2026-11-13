@@ -1,0 +1,23 @@
+{
+  "distribution": {
+    "import_bookmarks": false,
+    "import_history": false,
+    "import_search_engine": false,
+    "make_chrome_default": false,
+    "make_chrome_default_for_user": false,
+    "suppress_first_run_default_browser_prompt": true,
+    "skip_first_run_ui": true
+  },
+  "https_only_mode_enabled": true,
+  "profile": {
+    "cookie_controls_mode": 1,
+    "block_third_party_cookies": true
+  },
+  "enable_do_not_track": false,
+  "extensions": {
+    "pinned_extensions": ["hpgdgeidplcdilgooojfjcglokfpdmof"]
+  },
+  "browser": {
+    "has_seen_welcome_page": true
+  }
+}

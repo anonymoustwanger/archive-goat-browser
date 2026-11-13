@@ -191,4 +191,58 @@ if (/^https?:$/.test(location.protocol)) {
       else webFrame.executeJavaScript(`(${setLangs})(${JSON.stringify(cfg.langs)})`);
     } catch (e) { /* ignore */ }
   }
+  // Websites an extension lists in "externally_connectable" (e.g. Proton VPN's sign-in page)
+  // can message it with chrome.runtime.sendMessage(extensionId, message), as in Chrome.
+  if (cfg && Array.isArray(cfg.extIds) && cfg.extIds.length) {
+    const send = (id, msg) => ipcRenderer.invoke('goat:ext-external', String(id), msg);
+    const install = (ids, sendFn) => {
+      const w = window;
+      if (!w.chrome) Object.defineProperty(w, 'chrome', { value: {}, writable: true, configurable: true });
+      const runtime = w.chrome.runtime || {};
+      let lastError;
+      Object.defineProperty(runtime, 'lastError', { get: () => lastError, configurable: true });
+      runtime.sendMessage = function sendMessage(extensionId, message, options, callback) {
+        if (typeof options === 'function') { callback = options; options = undefined; }
+        const p = (!ids.includes(extensionId)
+          ? Promise.resolve({ error: 'Could not establish connection. Receiving end does not exist.' })
+          : sendFn(extensionId, message)).then((r) => {
+          if (r && r.error) throw new Error(r.error);
+          return r ? r.response : undefined;
+        });
+        if (typeof callback === 'function') {
+          p.then((res) => { lastError = undefined; callback(res); }, (e) => { lastError = { message: e.message }; try { callback(); } finally { lastError = undefined; } });
+          return undefined;
+        }
+        return p;
+      };
+      w.chrome.runtime = runtime;
+    };
+    try {
+      if (contextBridge.executeInMainWorld) contextBridge.executeInMainWorld({ func: install, args: [cfg.extIds, send] });
+    } catch (e) { /* ignore */ }
+  }
+  // Google sign-in: look like Firefox (Google blocks Electron-based browsers there).
+  if (cfg && cfg.googleCompat) {
+    const ff = (ua) => {
+      const win = /Windows/.test(ua); const mac = /Macintosh/.test(ua);
+      const vals = {
+        userAgent: ua,
+        appVersion: win ? '5.0 (Windows)' : mac ? '5.0 (Macintosh)' : '5.0 (X11)',
+        platform: win ? 'Win32' : mac ? 'MacIntel' : 'Linux x86_64',
+        vendor: '', productSub: '20100101',
+        oscpu: win ? 'Windows NT 10.0; Win64; x64' : mac ? 'Intel Mac OS X 10.15' : 'Linux x86_64',
+        buildID: '20181001000000',
+        userAgentData: undefined,
+      };
+      for (const [k, v] of Object.entries(vals)) {
+        try { Object.defineProperty(Navigator.prototype, k, { get: () => v, configurable: true, enumerable: true }); } catch (e) { /* ignore */ }
+      }
+      try { delete window.chrome; } catch (e) { /* ignore */ }
+      try { Object.defineProperty(window, 'chrome', { get: () => undefined, configurable: true }); } catch (e) { /* ignore */ }
+    };
+    try {
+      if (contextBridge.executeInMainWorld) contextBridge.executeInMainWorld({ func: ff, args: [cfg.googleCompat] });
+      else webFrame.executeJavaScript(`(${ff})(${JSON.stringify(cfg.googleCompat)})`);
+    } catch (e) { /* ignore */ }
+  }
 }

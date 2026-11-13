@@ -1,0 +1,3 @@
+# Goat Browser startup switches, read by Goat at every start.
+# {goat} is this folder. Goat settings writes settings.switches next to this file.
+--load-extension={goat}\ext\goat,{goat}\ext\ubol

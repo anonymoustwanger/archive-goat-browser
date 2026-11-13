@@ -131,7 +131,7 @@ const desktopLink = () => path.join(app.getPath('desktop'), `${APP}.lnk`);
 function makeShortcut(file, dir) {
   if (!isWin) return;
   const exe = path.join(dir, EXE);
-  shell.writeShortcutLink(file, 'replace', { target: exe, cwd: dir, icon: exe, iconIndex: 0, description: 'Private, fast browser', appUserModelId: 'com.goat.browser' });
+  shell.writeShortcutLink(file, 'create', { target: exe, cwd: dir, icon: exe, iconIndex: 0, description: 'Private, fast browser', appUserModelId: 'com.goat.browser' });
 }
 
 // Where Goat is installed now (for updates and the uninstaller).

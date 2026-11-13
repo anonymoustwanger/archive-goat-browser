@@ -1,0 +1,7 @@
+{
+  "name": "com.goat.host",
+  "description": "Goat Browser helper (Tor and startup settings)",
+  "path": "goat-host.exe",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://hpgdgeidplcdilgooojfjcglokfpdmof/"]
+}

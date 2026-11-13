@@ -1,0 +1,217 @@
+# Packages Goat Browser for Windows and Linux: Goat's Chromium (from the newest
+# "base-*" / "base-linux-*" pre-releases, made by the Chromium base workflows) + the Goat extension, uBlock Origin Lite, Tor and
+# the Goat helper, into GoatBrowserSetup-<version>.exe and
+# GoatBrowser-<version>-x86_64.AppImage. Takes about 10 minutes.
+#
+# Release: push a tag like v5.0.0 (GitHub Desktop: Repository > Create tag, then
+# push). Or run it from the Actions tab to just get the installer as an artifact.
+name: Goat release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Windows Chromium base tag (empty = newest)
+        required: false
+        default: ''
+      base_linux:
+        description: Linux Chromium base tag (empty = newest)
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v=$(python -c "import json;print(json.load(open('chromium/extension/manifest.json'))['version'])"); fi
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag must look like v5.0.0"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "STAGE=$(cygpath -w "$RUNNER_TEMP/stage")" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/stage/goat/ext"
+
+      - name: Get Goat's Chromium
+        run: |
+          base="${{ inputs.base }}"
+          if [ -z "$base" ]; then
+            base=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isPrerelease,createdAt \
+              --jq '[.[] | select(.tagName | startswith("base-") and (startswith("base-linux-") | not))] | sort_by(.createdAt) | last | .tagName')
+          fi
+          [ -n "$base" ] && [ "$base" != "null" ] || { echo "No Chromium base yet. Run the 'Chromium base' workflow first."; exit 1; }
+          echo "Using $base"
+          echo "BASE=$base" >> "$GITHUB_ENV"
+          gh release download "$base" --repo "$GITHUB_REPOSITORY" --pattern goat-chromium-installer.exe --dir "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/goat-chromium-installer.exe" "$RUNNER_TEMP/stage/mini_installer.exe"
+
+      - name: Get Tor
+        run: bash chromium/scripts/fetch-tor.sh "$RUNNER_TEMP/stage/goat"
+
+      - name: Get uBlock Origin Lite
+        run: |
+          gh release download --repo uBlockOrigin/uBOL-home --pattern '*chromium*.zip' --dir "$RUNNER_TEMP/ubol-zip"
+          zip=$(ls "$RUNNER_TEMP"/ubol-zip/*.zip | head -1)
+          echo "uBOL: $(basename "$zip")"
+          dest="$RUNNER_TEMP/stage/goat/ext/ubol"
+          mkdir -p "$dest" && unzip -q "$zip" -d "$dest"
+          if [ ! -f "$dest/manifest.json" ]; then
+            inner=$(dirname "$(find "$dest" -name manifest.json -maxdepth 3 | head -1)")
+            [ -n "$inner" ] && [ "$inner" != "." ] || { echo "manifest.json not found in $zip"; exit 1; }
+            tmp="$RUNNER_TEMP/ubol-tmp"; mv "$inner" "$tmp"; rm -rf "$dest"; mv "$tmp" "$dest"
+          fi
+          test -f "$dest/manifest.json"
+
+      - name: Build the Goat helper
+        shell: pwsh
+        run: |
+          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          & $csc /nologo /langversion:5 /platform:x64 /target:exe /optimize+ `
+            /out:"$env:STAGE\goat\goat-host.exe" /r:System.Web.Extensions.dll chromium\host\GoatHost.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Add the Goat extension and settings
+        run: |
+          s="$RUNNER_TEMP/stage"
+          cp -r chromium/extension "$s/goat/ext/goat"
+          python - "$s/goat/ext/goat/manifest.json" "$VERSION" <<'PY'
+          import json, sys
+          p, v = sys.argv[1], sys.argv[2]
+          m = json.load(open(p, encoding='utf-8')); m['version'] = v
+          json.dump(m, open(p, 'w', encoding='utf-8'), indent=2)
+          PY
+          cp chromium/switches.txt chromium/host-manifest.json "$s/goat/"
+          cp chromium/settings.switches "$s/goat/settings.switches.default"
+          cp chromium/initial_preferences "$s/"
+          find "$s" -maxdepth 3 | sort
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $nsis = Get-Command makensis -ErrorAction SilentlyContinue
+          if (-not $nsis) {
+            $exe = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+            if (-not (Test-Path $exe)) { choco install nsis -y --no-progress | Out-Null }
+            $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          } else { $nsis = $nsis.Source }
+          & $nsis /V2 "/DVERSION=$env:VERSION" "/DSTAGE=$env:STAGE" chromium\installer\goat-setup.nsi
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: GoatBrowserSetup-${{ env.VERSION }}
+          path: ${{ env.STAGE }}\GoatBrowserSetup-${{ env.VERSION }}.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF#refs/tags/v}"; else v=$(python3 -c "import json;print(json.load(open('chromium/extension/manifest.json'))['version'])"); fi
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag must look like v5.0.0"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "APPDIR=$RUNNER_TEMP/Goat.AppDir" >> "$GITHUB_ENV"
+
+      - name: Get Goat's Chromium
+        run: |
+          base="${{ inputs.base_linux }}"
+          if [ -z "$base" ]; then
+            base=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+              --jq '[.[] | select(.tagName | startswith("base-linux-"))] | sort_by(.createdAt) | last | .tagName')
+          fi
+          [ -n "$base" ] && [ "$base" != "null" ] || { echo "No Linux Chromium base yet. Run the 'Chromium base (Linux)' workflow first."; exit 1; }
+          echo "Using $base"
+          gh release download "$base" --repo "$GITHUB_REPOSITORY" --pattern goat-chromium-linux.tar.xz --dir "$RUNNER_TEMP"
+          mkdir -p "$APPDIR/opt/goat-browser"
+          tar -xJf "$RUNNER_TEMP/goat-chromium-linux.tar.xz" -C "$APPDIR/opt/goat-browser" --strip-components=1
+          test -x "$APPDIR/opt/goat-browser/chrome"
+
+      - name: Get Tor
+        run: bash chromium/scripts/fetch-tor.sh "$APPDIR/opt/goat-browser/goat" linux-x86_64
+
+      - name: Get uBlock Origin Lite
+        run: |
+          gh release download --repo uBlockOrigin/uBOL-home --pattern '*chromium*.zip' --dir "$RUNNER_TEMP/ubol-zip"
+          zip=$(ls "$RUNNER_TEMP"/ubol-zip/*.zip | head -1)
+          dest="$APPDIR/opt/goat-browser/goat/ext/ubol"
+          mkdir -p "$dest" && unzip -q "$zip" -d "$dest"
+          if [ ! -f "$dest/manifest.json" ]; then
+            inner=$(dirname "$(find "$dest" -maxdepth 3 -name manifest.json | head -1)")
+            tmp="$RUNNER_TEMP/ubol-tmp"; mv "$inner" "$tmp"; rm -rf "$dest"; mv "$tmp" "$dest"
+          fi
+          test -f "$dest/manifest.json"
+
+      - name: Add Goat
+        run: |
+          g="$APPDIR/opt/goat-browser/goat"
+          cp -r chromium/extension "$g/ext/goat"
+          python3 - "$g/ext/goat/manifest.json" "$VERSION" <<'PY'
+          import json, sys
+          p, v = sys.argv[1], sys.argv[2]
+          m = json.load(open(p, encoding='utf-8')); m['version'] = v
+          json.dump(m, open(p, 'w', encoding='utf-8'), indent=2)
+          PY
+          cp chromium/linux/switches.txt chromium/host-manifest.json "$g/"
+          cp chromium/settings.switches "$g/settings.switches.default"
+          install -m 755 chromium/host/goat-host.py "$g/goat-host.py"
+          install -m 755 chromium/linux/AppRun "$APPDIR/AppRun"
+          cp chromium/linux/goat-browser.desktop "$APPDIR/"
+          python3 -m pip install --quiet pillow
+          python3 -c "from PIL import Image; Image.open('chromium/branding/icon.png').convert('RGBA').resize((256,256)).save('$APPDIR/goat-browser.png')"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+          cp "$APPDIR/goat-browser.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+          find "$APPDIR" -maxdepth 4 -not -path '*/locales/*' | sort | head -60
+
+      - name: Build the AppImage
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          out="$RUNNER_TEMP/GoatBrowser-$VERSION-x86_64.AppImage"
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 VERSION="$VERSION" "$RUNNER_TEMP/appimagetool" --no-appstream "$APPDIR" "$out"
+          echo "APPIMAGE=$out" >> "$GITHUB_ENV"
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v7
+        with:
+          name: GoatBrowser-${{ env.VERSION }}-x86_64.AppImage
+          path: ${{ env.APPIMAGE }}
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package, linux]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v8
+        with:
+          path: files
+          merge-multiple: true
+      - name: Publish release
+        run: |
+          v="${GITHUB_REF#refs/tags/v}"
+          tag="v$v"
+          ls -la files
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" files/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" files/* --repo "$GITHUB_REPOSITORY" --title "Goat Browser $v" \
+              --notes "Goat Browser $v, built on Chromium. Windows: download GoatBrowserSetup-$v.exe and run it. Linux: download GoatBrowser-$v-x86_64.AppImage, make it executable and open it."
+          fi

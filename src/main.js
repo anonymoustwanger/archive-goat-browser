@@ -554,8 +554,28 @@ function onBeforeRequest(details, callback) {
   });
 }
 
+// Google refuses sign-in from browsers built on Electron ("This browser or app may not be
+// secure"). On its sign-in pages only, Goat looks like current Firefox: Firefox's user agent,
+// no Chrome client hints, and Firefox-like navigator values (set in fp-preload).
+const GOOGLE_SIGNIN_HOSTS = new Set(['accounts.google.com', 'accounts.youtube.com']);
+function firefoxUA() {
+  // Firefox 160 shipped 2026-11-10; a new version every 4 weeks keeps this current.
+  const v = 160 + Math.max(0, Math.floor((Date.now() - Date.UTC(2026, 10, 10)) / (28 * 864e5)));
+  const plat = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10.15' : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${plat}; rv:${v}.0) Gecko/20100101 Firefox/${v}.0`;
+}
+const isGoogleSignIn = (url) => { try { return GOOGLE_SIGNIN_HOSTS.has(new URL(url).hostname); } catch { return false; } };
+
 function onBeforeSendHeaders(details, callback) {
   const h = details.requestHeaders;
+  if (isGoogleSignIn(details.url)) {
+    for (const k of Object.keys(h)) {
+      const lk = k.toLowerCase();
+      if (lk === 'user-agent') delete h[k];
+      if (lk.startsWith('sec-ch-')) delete h[k];
+    }
+    h['User-Agent'] = firefoxUA();
+  }
   h['Sec-GPC'] = '1';
   h['DNT'] = '1';
   if (settings.privacy.fingerprint !== 'off') {
@@ -868,7 +888,126 @@ function wireExtensionProxy() {
     return undefined;
   });
   extApi().on('extension-unloaded', (_e, ext) => { if (extProxy && extProxy.owner === ext.id) { extProxy = null; applyProxy(); } });
+  // Chrome keeps an extension's proxy across restarts; so does Goat (only while that extension is installed).
+  handle('goat.runtime.externalReply', (_ctx, requestId, resp) => {
+    const done = pendingExtMsgs.get(requestId);
+    if (done) { pendingExtMsgs.delete(requestId); done(resp); }
+    return undefined;
+  });
+  ipcMain.handle('goat:ext-external', async (event, extId, message) => {
+    const url = (event.senderFrame && event.senderFrame.url) || '';
+    if (event.sender.session !== ses) return { error: 'Extensions are off in private windows.' };
+    if (!externallyConnectableIds(url).includes(String(extId))) return { error: 'This site may not talk to that extension.' };
+    const tab = tabByWebContentsId(event.sender.id);
+    let msg; try { msg = JSON.parse(JSON.stringify(message)); } catch { return { error: 'Message could not be sent.' }; }
+    return deliverExternalMessage(String(extId), msg, { url, origin: originOf(url), frameId: 0, tab: tab ? { id: event.sender.id, url, active: tab.id === activeId } : undefined });
+  });
 }
+// ------------------------------------- website -> extension messages (externally_connectable)
+// e.g. Proton VPN: you sign in on account.proton.me and the page hands the login to the extension.
+function matchUrlPattern(pattern, url) {
+  if (pattern === '<all_urls>') return /^(https?|wss?|ftp):/.test(url);
+  const m = /^(\*|https?|wss?|ftp):\/\/([^/]+)(\/.*)?$/.exec(pattern);
+  let u; try { u = new URL(url); } catch { return false; }
+  if (!m) return false;
+  const scheme = u.protocol.slice(0, -1);
+  if (m[1] === '*' ? !/^https?$/.test(scheme) : m[1] !== scheme) return false;
+  const host = m[2].toLowerCase(); const h = u.hostname.toLowerCase();
+  if (host !== '*' && host !== h && !(host.startsWith('*.') && (h === host.slice(2) || h.endsWith(host.slice(1))))) return false;
+  const pathRe = new RegExp('^' + (m[3] || '/*').split('*').map((x) => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+  return pathRe.test(u.pathname + u.search);
+}
+function externallyConnectableIds(url) {
+  if (!extensions || !/^https?:/.test(url)) return [];
+  return extApi().getAllExtensions().filter((e) => {
+    const ec = e.manifest && e.manifest.externally_connectable;
+    return ec && Array.isArray(ec.matches) && ec.matches.some((p) => matchUrlPattern(p, url));
+  }).map((e) => e.id);
+}
+let extMsgSeq = 0;
+const pendingExtMsgs = new Map(); // requestId -> resolve
+async function deliverExternalMessage(extId, message, sender) {
+  const router = extensions.ctx.router;
+  const listenersOf = () => {
+    const obs = router.sessionMap && router.sessionMap.get(ses);
+    const map = (obs && obs.listeners) || router.listeners;
+    return (map && map.get('goat.runtime.messageExternal')) || [];
+  };
+  const hasListener = () => listenersOf().some((l) => l.extensionId === extId);
+  if (!hasListener()) {
+    // Wake the extension's background worker, then give it a moment to register.
+    try { await ses.serviceWorkers.startWorkerForScope(`chrome-extension://${extId}/`); } catch { /* not a worker */ }
+    for (let i = 0; i < 30 && !hasListener(); i++) await new Promise((r) => setTimeout(r, 100));
+    if (!hasListener()) return { error: 'The extension is not listening.' };
+  }
+  const requestId = `goat-ext-${++extMsgSeq}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { if (pendingExtMsgs.delete(requestId)) resolve({ error: 'The extension did not answer.' }); }, 30000);
+    pendingExtMsgs.set(requestId, (resp) => { clearTimeout(timer); resolve({ response: resp }); });
+    router.sendEvent(extId, 'goat.runtime.messageExternal', message, sender, requestId);
+  });
+}
+
+// ------------------------------------------------- extension debug log
+// Writes what happens in extension popups and background workers to goat-debug.log in the
+// profile folder: popup position/size/focus, every click and key that reaches the popup
+// page, and errors. Used to find out why extension buttons don't respond on a real PC.
+function debugLog(line) {
+  const file = path.join(userDir(), 'goat-debug.log');
+  try {
+    try { if (fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, file + '.old'); } catch { /* new */ }
+    fs.appendFileSync(file, `${new Date().toISOString()} ${line}\n`);
+  } catch { /* ignore */ }
+}
+function wireExtensionDiagnostics() {
+  const { screen } = require('electron');
+  const nameOf = (url) => {
+    const m = /^chrome-extension:\/\/([a-p]{32})/.exec(url || '');
+    if (!m) return null;
+    const e = extApi().getExtension(m[1]);
+    return e ? extText(e, e.name) : m[1];
+  };
+  const LEVEL = { 0: 'log', 1: 'info', 2: 'warn', 3: 'error', verbose: 'log', info: 'info', warning: 'warn', error: 'error' };
+  extensions.on('browser-action-popup-created', (popup) => {
+    const pw = popup.browserWindow;
+    if (!pw) return;
+    const who = nameOf(pw.webContents.getURL()) || popup.extensionId;
+    const disp = screen.getDisplayMatching(win.getBounds());
+    debugLog(`[popup ${who}] created; main window content ${JSON.stringify(win.getContentBounds())}, display scale ${disp.scaleFactor}, anchor ${JSON.stringify(popup.anchorRect)}`);
+    pw.on('show', () => debugLog(`[popup ${who}] shown at ${JSON.stringify(pw.getBounds())}, focused=${pw.isFocused()}, visible=${pw.isVisible()}`));
+    pw.on('focus', () => debugLog(`[popup ${who}] focus`));
+    pw.on('blur', () => debugLog(`[popup ${who}] blur (focused window now: ${(() => { const f = require('electron').BrowserWindow.getFocusedWindow(); return f ? f.id : 'none'; })()})`));
+    pw.on('resize', () => debugLog(`[popup ${who}] bounds ${JSON.stringify(pw.getBounds())}`));
+    pw.on('closed', () => debugLog(`[popup ${who}] closed`));
+    const wc = pw.webContents;
+    wc.on('console-message', (e) => debugLog(`[popup ${who} ${LEVEL[e.level] || e.level}] ${e.message} @ ${e.sourceId}:${e.lineNumber}`));
+    wc.on('did-fail-load', (_e, code, desc, url) => debugLog(`[popup ${who}] failed to load ${url}: ${desc} (${code})`));
+    wc.on('render-process-gone', (_e, d) => debugLog(`[popup ${who}] page crashed: ${d.reason}`));
+    wc.on('before-input-event', (_e, input) => { if (input.type === 'keyDown') debugLog(`[popup ${who}] key ${input.key}`); });
+    wc.on('dom-ready', () => {
+      // Report every mouse press/click that reaches the page, and what it hit.
+      wc.executeJavaScriptInIsolatedWorld(999, [{ code: `
+        const d = (t, e) => { const el = e.target; console.debug('[goat-diag] ' + t + ' at ' + e.clientX + ',' + e.clientY + ' on <' + (el.tagName || '?').toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '') + '> "' + String(el.textContent || '').trim().slice(0, 40) + '"' + (e.defaultPrevented ? ' (handled)' : '')); };
+        document.addEventListener('pointerdown', (e) => d('press', e), true);
+        document.addEventListener('click', (e) => setTimeout(() => d('click', e), 0), true);
+        window.addEventListener('error', (e) => console.debug('[goat-diag] page error: ' + e.message));
+        window.addEventListener('unhandledrejection', (e) => console.debug('[goat-diag] unhandled promise: ' + (e.reason && e.reason.message || e.reason)));
+        'ok';` }]).catch((err) => debugLog(`[popup ${who}] couldn't watch clicks: ${err.message}`));
+      debugLog(`[popup ${who}] page ready: ${wc.getURL()}`);
+    });
+  });
+  // Extension background workers: errors and warnings.
+  ses.serviceWorkers.on('console-message', (_e, d) => {
+    const who = nameOf(d.sourceUrl || d.scope || '');
+    const lvl = LEVEL[d.level] || d.level;
+    if (who && (lvl === 'error' || lvl === 'warn')) debugLog(`[background ${who} ${lvl}] ${d.message} @ ${d.sourceUrl}:${d.lineNumber}`);
+  });
+  // Native messaging (e.g. iCloud Passwords <-> iCloud for Windows): connection steps and errors only,
+  // never message contents (they can contain passwords).
+  process.on('goat-debug', (line) => { if (!/\] (receive|send|sending)\b/.test(line)) debugLog(line); });
+  debugLog(`--- Goat ${require(path.join(__dirname, '..', 'package.json')).version} started; extensions: ${extApi().getAllExtensions().map((e) => extText(e, e.name)).join(', ') || 'none yet'}`);
+}
+
 // The VPN extension's servers ask for a login: let the extension answer, as Chrome does.
 function askExtensionForProxyLogin(authInfo, url, callback) {
   if (!extProxy || !extensions) return false;
@@ -1764,7 +1903,7 @@ function profileShortcut(id) {
   if (process.platform !== 'win32') return false;
   const p = loadProfiles().find((x) => x.id === id);
   if (!p) return false;
-  return shell.writeShortcutLink(path.join(app.getPath('desktop'), `Goat Browser - ${p.name.replace(/[\\/:*?"<>|]/g, '')}.lnk`), 'replace', {
+  return shell.writeShortcutLink(path.join(app.getPath('desktop'), `Goat Browser - ${p.name.replace(/[\\/:*?"<>|]/g, '')}.lnk`), 'create', {
     target: process.execPath, args: profileArgs(id).join(' '), icon: process.execPath, iconIndex: 0, description: `Goat Browser (${p.name})`,
     appUserModelId: id === 'default' ? 'com.goat.browser' : `com.goat.browser.profile.${id}`,
   });
@@ -2714,7 +2853,9 @@ function wirePagesIpc() {
     const langs = acceptLanguage(settings.languages.sites).split(',').map((x) => x.split(';')[0]);
     let top = url;
     try { top = event.sender.getURL() || url; } catch { /* ignore */ }
-    event.returnValue = { level: settings.privacy.fingerprint, webauthn: settings.privacy.webauthn, seed: fpSeed(top || url), chrome: CHROME_MAJOR, langs };
+    event.returnValue = { level: settings.privacy.fingerprint, webauthn: settings.privacy.webauthn, seed: fpSeed(top || url), chrome: CHROME_MAJOR, langs,
+      googleCompat: isGoogleSignIn(url) ? firefoxUA() : '',
+      extIds: event.sender.session === ses && event.senderFrame && !event.senderFrame.parent ? externallyConnectableIds(url) : [] };
   });
   // A site wants a passkey / security key: ask before Windows shows its dialog.
   const webauthnAllowed = new Map(); // origin -> true (this run only)
@@ -2918,6 +3059,7 @@ async function setupExtensions() {
     });
     ElectronChromeExtensions.handleCRXProtocol(session.defaultSession); // toolbar icons
     wireExtensionProxy();
+    wireExtensionDiagnostics();
     extensions.ctx.goatName = (e) => extText(e, e.name);
     // Right-click on a toolbar extension button: add pin/unpin and manage.
     extensions.on('goat-action-context-menu', ({ extension, append, appendSeparator }) => {
@@ -3221,7 +3363,7 @@ if (process.env.GOAT_TEST) {
     createTab, newGroupWith, setGroupCollapsed, addToGroup, removeFromGroup, applySettings, mergeTabs, moveGroup,
     togglePanel, hidePanel, panel: () => panel, addBookmark, bookmarks: () => bookmarks, toggleBookmarkForActive,
     sleepTab, discardTab, activateTab, pendingUrls, listExtensions, shield: () => shieldState, closeTabById: (id) => closeTab(id),
-    history: () => history, toggleAppMenu, translateTab, showOriginal, ui: () => ui, skipForExtension, createProfile, deleteProfile, openProfile, loadProfiles, checkForUpdates, update: () => update, appMenu: () => appMenu,
+    history: () => history, toggleAppMenu, translateTab, showOriginal, ui: () => ui, skipForExtension, extRouter: () => extensions && extensions.ctx.router, extensions: () => extensions, win: () => win, extMenu: () => extMenu, googleHosts: GOOGLE_SIGNIN_HOSTS, createProfile, deleteProfile, openProfile, loadProfiles, checkForUpdates, update: () => update, appMenu: () => appMenu,
     groups, tabs, order: () => order, activeId: () => activeId, session: () => ses, pushState,
   };
 }

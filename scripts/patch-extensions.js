@@ -26,8 +26,9 @@ function patchFile(file, edits) {
   const p = path.join(root, file);
   let s = fs.readFileSync(p, 'utf8');
   let changed = false;
-  for (const [name, from, to] of edits) {
+  for (const [name, from, to, marker] of edits) {
     if (s.includes(to)) continue; // already applied
+    if (marker && s.includes(marker)) continue; // applied, then changed by a later edit
     if (!s.includes(from)) throw new Error(`patch-extensions: "${name}" no longer matches ${file}. Update scripts/patch-extensions.js.`);
     s = s.replace(from, to);
     changed = true;
@@ -40,6 +41,8 @@ function patchFile(file, edits) {
 
 // ------------------------------------------------------------ main process
 const mainEdits = [
+  ['native messaging debug log', 'var d7 = (0, import_debug7.default)("electron-chrome-extensions:nativeMessaging");',
+    'var d7 = ((dbg) => (...args) => { dbg(...args); try { process.emit("goat-debug", "[native messaging] " + require("util").format(...args)); } catch (e) { /* ignore */ } })((0, import_debug7.default)("electron-chrome-extensions:nativeMessaging"));'],
   ['registry default value', `      const resultLine = lines.find(
         (line) => key ? line.includes(key) : line.includes("(Default)")
       );`, `      // "(Default)" is localized by Windows ("(Standard)", "(Par défaut)"...), so match the type.
@@ -150,7 +153,52 @@ const mainEdits = [
         return schemeOk && hostOk;
       };
       const hasOrigins = permissions.origins ? permissions.origins.every((origin) => currentPermissions.origins.includes(origin) || currentPermissions.origins.some((g) => goatCovers(goatParse(g), goatParse(origin)))) : true;`],
-  ['popup sizing and position', "  setSize(rect) {\n    if (!this.browserWindow || !this.parent) return;\n    const width = Math.floor(\n      Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth))\n    );\n    const height = Math.floor(\n      Math.min(_PopupView.BOUNDS.maxHeight, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight))\n    );\n    const size = { width, height };\n    d(`setSize`, size);\n    this.emit(\"will-resize\", size);\n    this.browserWindow?.setBounds({\n      ...this.browserWindow.getBounds(),\n      ...size\n    });\n    this.emit(\"resized\");\n  }\n  updatePosition() {\n    if (!this.browserWindow || !this.parent) return;\n    const winBounds = this.parent.getBounds();\n    const winContentBounds = this.parent.getContentBounds();\n    const nativeTitlebarHeight = winBounds.height - winContentBounds.height;\n    const viewBounds = this.browserWindow.getBounds();\n    let x = winBounds.x + this.anchorRect.x + this.anchorRect.width - viewBounds.width;\n    let y = winBounds.y + nativeTitlebarHeight + this.anchorRect.y + this.anchorRect.height + _PopupView.POSITION_PADDING;\n    if (this.alignment?.includes(\"right\")) x = winBounds.x + this.anchorRect.x;\n    if (this.alignment?.includes(\"top\"))\n      y = winBounds.y + nativeTitlebarHeight - viewBounds.height + this.anchorRect.y - _PopupView.POSITION_PADDING;\n    x = Math.floor(x);\n    y = Math.floor(y);\n    const position = { x, y };\n    d(`updatePosition`, position);\n    this.emit(\"will-move\", position);\n    this.browserWindow.setBounds({\n      ...this.browserWindow.getBounds(),\n      ...position\n    });\n    this.emit(\"moved\");\n  }", "  setSize(rect) {\n    // goat: round up (rounding down made popups show scrollbars or cut off a pixel),\n    // keep the popup inside the window, and apply size + position in ONE setBounds\n    // so Windows doesn't paint a half-moved popup.\n    if (!this.browserWindow || !this.parent) return;\n    const content = this.parent.getContentBounds();\n    const maxH = Math.max(_PopupView.BOUNDS.minHeight, Math.min(_PopupView.BOUNDS.maxHeight, content.height - (this.anchorRect.y + this.anchorRect.height) - 12));\n    const width = Math.ceil(Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth)));\n    const height = Math.ceil(Math.min(maxH, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight)));\n    this.size = { width, height };\n    d(`setSize`, this.size);\n    this.emit(\"will-resize\", this.size);\n    this.applyBounds();\n    this.emit(\"resized\");\n  }\n  updatePosition() {\n    if (!this.browserWindow || !this.parent) return;\n    this.applyBounds();\n    this.emit(\"moved\");\n  }\n  applyBounds() {\n    if (!this.browserWindow || this.browserWindow.isDestroyed() || !this.parent) return;\n    const size = this.size || this.browserWindow.getBounds();\n    // Content bounds, not window bounds: correct for frameless/maximized windows\n    // (a maximized window's bounds include ~8 px of invisible border on Windows).\n    const content = this.parent.getContentBounds();\n    let x = content.x + this.anchorRect.x + this.anchorRect.width - size.width;\n    let y = content.y + this.anchorRect.y + this.anchorRect.height + _PopupView.POSITION_PADDING;\n    if (this.alignment?.includes(\"right\")) x = content.x + this.anchorRect.x;\n    if (this.alignment?.includes(\"top\")) y = content.y + this.anchorRect.y - size.height - _PopupView.POSITION_PADDING;\n    x = Math.round(Math.max(content.x + 4, Math.min(x, content.x + content.width - size.width - 4)));\n    y = Math.round(y);\n    const next = { x, y, width: size.width, height: size.height };\n    const cur = this.browserWindow.getBounds();\n    if (cur.x === next.x && cur.y === next.y && cur.width === next.width && cur.height === next.height) return;\n    this.emit(\"will-move\", { x, y });\n    this.browserWindow.setBounds(next);\n  }"],
+  ['popup sizing and position', "  setSize(rect) {\n    if (!this.browserWindow || !this.parent) return;\n    const width = Math.floor(\n      Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth))\n    );\n    const height = Math.floor(\n      Math.min(_PopupView.BOUNDS.maxHeight, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight))\n    );\n    const size = { width, height };\n    d(`setSize`, size);\n    this.emit(\"will-resize\", size);\n    this.browserWindow?.setBounds({\n      ...this.browserWindow.getBounds(),\n      ...size\n    });\n    this.emit(\"resized\");\n  }\n  updatePosition() {\n    if (!this.browserWindow || !this.parent) return;\n    const winBounds = this.parent.getBounds();\n    const winContentBounds = this.parent.getContentBounds();\n    const nativeTitlebarHeight = winBounds.height - winContentBounds.height;\n    const viewBounds = this.browserWindow.getBounds();\n    let x = winBounds.x + this.anchorRect.x + this.anchorRect.width - viewBounds.width;\n    let y = winBounds.y + nativeTitlebarHeight + this.anchorRect.y + this.anchorRect.height + _PopupView.POSITION_PADDING;\n    if (this.alignment?.includes(\"right\")) x = winBounds.x + this.anchorRect.x;\n    if (this.alignment?.includes(\"top\"))\n      y = winBounds.y + nativeTitlebarHeight - viewBounds.height + this.anchorRect.y - _PopupView.POSITION_PADDING;\n    x = Math.floor(x);\n    y = Math.floor(y);\n    const position = { x, y };\n    d(`updatePosition`, position);\n    this.emit(\"will-move\", position);\n    this.browserWindow.setBounds({\n      ...this.browserWindow.getBounds(),\n      ...position\n    });\n    this.emit(\"moved\");\n  }", "  setSize(rect) {\n    // goat: round up (rounding down made popups show scrollbars or cut off a pixel),\n    // keep the popup inside the window, and apply size + position in ONE setBounds\n    // so Windows doesn't paint a half-moved popup.\n    if (!this.browserWindow || !this.parent) return;\n    const content = this.parent.getContentBounds();\n    const maxH = Math.max(_PopupView.BOUNDS.minHeight, Math.min(_PopupView.BOUNDS.maxHeight, content.height - (this.anchorRect.y + this.anchorRect.height) - 12));\n    const width = Math.ceil(Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth)));\n    const height = Math.ceil(Math.min(maxH, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight)));\n    this.size = { width, height };\n    d(`setSize`, this.size);\n    this.emit(\"will-resize\", this.size);\n    this.applyBounds();\n    this.emit(\"resized\");\n  }\n  updatePosition() {\n    if (!this.browserWindow || !this.parent) return;\n    this.applyBounds();\n    this.emit(\"moved\");\n  }\n  applyBounds() {\n    if (!this.browserWindow || this.browserWindow.isDestroyed() || !this.parent) return;\n    const size = this.size || this.browserWindow.getBounds();\n    // Content bounds, not window bounds: correct for frameless/maximized windows\n    // (a maximized window's bounds include ~8 px of invisible border on Windows).\n    const content = this.parent.getContentBounds();\n    let x = content.x + this.anchorRect.x + this.anchorRect.width - size.width;\n    let y = content.y + this.anchorRect.y + this.anchorRect.height + _PopupView.POSITION_PADDING;\n    if (this.alignment?.includes(\"right\")) x = content.x + this.anchorRect.x;\n    if (this.alignment?.includes(\"top\")) y = content.y + this.anchorRect.y - size.height - _PopupView.POSITION_PADDING;\n    x = Math.round(Math.max(content.x + 4, Math.min(x, content.x + content.width - size.width - 4)));\n    y = Math.round(y);\n    const next = { x, y, width: size.width, height: size.height };\n    const cur = this.browserWindow.getBounds();\n    if (cur.x === next.x && cur.y === next.y && cur.width === next.width && cur.height === next.height) return;\n    this.emit(\"will-move\", { x, y });\n    this.browserWindow.setBounds(next);\n  }", "// goat: round up (rounding down made popups show scrollbars or cut off a pixel)"],
+  ['popup: steady size, no moves during clicks', `    this.browserWindow.on("closed", this.destroy);
+    this.parent.once("closed", this.destroy);`, `    this.browserWindow.on("closed", this.destroy);
+    this.parent.once("closed", this.destroy);
+    // goat: popups jumped around while you used them: a scrollbar flashed in whenever the
+    // content grew (changing the width, and with it the popup's position), and each change
+    // moved the window. On Windows a window that moves under the cursor between mouse down
+    // and mouse up loses the click. So: no scrollbar while the content fits, batch size
+    // changes, and never move the popup while a mouse button is held down.
+    this.goatMouseDown = false;
+    this.goatOverflowKey = null;
+    const goatWc = this.browserWindow.webContents;
+    const goatRelease = () => { this.goatMouseDown = false; clearTimeout(this.goatDownTimer); if (this.goatPending) this.applyBounds(); };
+    goatWc.on("before-mouse-event", (_e, m) => {
+      if (m.type === "mouseDown") { this.goatMouseDown = true; clearTimeout(this.goatDownTimer); this.goatDownTimer = setTimeout(goatRelease, 2000); }
+      else if (m.type === "mouseUp") goatRelease();
+    });
+    this.browserWindow.on("blur", goatRelease);
+    goatWc.on("dom-ready", () => {
+      this.goatOverflowKey = null;
+      goatWc.insertCSS("html { overflow: hidden !important; }").then((k) => { this.goatOverflowKey = k; }).catch(() => {});
+    });`],
+  ['popup: scroll only when needed', `    const width = Math.ceil(Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth)));
+    const height = Math.ceil(Math.min(maxH, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight)));
+    this.size = { width, height };`, `    let width = Math.ceil(Math.min(_PopupView.BOUNDS.maxWidth, Math.max(rect.width || 0, _PopupView.BOUNDS.minWidth)));
+    const height = Math.ceil(Math.min(maxH, Math.max(rect.height || 0, _PopupView.BOUNDS.minHeight)));
+    // goat: content taller than the popup can be: allow scrolling again; otherwise keep it hidden.
+    const goatWc = this.browserWindow.webContents;
+    if ((rect.height || 0) > maxH && this.goatOverflowKey && this.goatOverflowKey !== "off") { goatWc.removeInsertedCSS(this.goatOverflowKey).catch(() => {}); this.goatOverflowKey = "off"; }
+    else if ((rect.height || 0) <= maxH && this.goatOverflowKey === "off") { this.goatOverflowKey = null; goatWc.insertCSS("html { overflow: hidden !important; }").then((k) => { this.goatOverflowKey = k; }).catch(() => {}); }
+    // Small width wobbles (scrollbar-sized) after the popup is shown don't resize it.
+    if (this.size && !this.hidden && width < this.size.width && this.size.width - width <= 20) width = this.size.width;
+    this.size = { width, height };`],
+  ['popup: batch moves, wait for mouse up', `  applyBounds() {
+    if (!this.browserWindow || this.browserWindow.isDestroyed() || !this.parent) return;
+    const size = this.size || this.browserWindow.getBounds();`, `  applyBounds() {
+    if (!this.browserWindow || this.browserWindow.isDestroyed() || !this.parent) return;
+    if (this.goatMouseDown) { this.goatPending = true; return; } // goat: wait until the click is done
+    if (!this.hidden && !this.goatFlush) {
+      // goat: visible popup: apply size/position changes at most once per frame.
+      this.goatPending = true;
+      if (!this.goatTimer) this.goatTimer = setTimeout(() => { this.goatTimer = null; this.goatFlush = true; try { this.applyBounds(); } finally { this.goatFlush = false; } }, 16);
+      return;
+    }
+    this.goatPending = false;
+    const size = this.size || this.browserWindow.getBounds();`],
 ];
 
 // ------------------------------------------------------------ extension preload
@@ -185,6 +233,45 @@ const SHIMS = `
           onChange,
         };
       };
+      // chrome.runtime.onMessageExternal: messages from websites listed in the extension's
+      // "externally_connectable" (e.g. Proton VPN's sign-in page). Goat delivers them from main.
+      if (manifest.externally_connectable && apiDefinitions.runtime) {
+        const goatRuntimeDef = apiDefinitions.runtime;
+        apiDefinitions.runtime = {
+          ...goatRuntimeDef,
+          factory: (base) => {
+            const rt = goatRuntimeDef.factory(base);
+            const listeners = new Set();
+            let wired = false;
+            const wire = () => {
+              if (wired) return;
+              wired = true;
+              new ExtensionEvent("goat.runtime.messageExternal").addListener((message, sender, requestId) => {
+                const reply = invokeExtension2("goat.runtime.externalReply");
+                let done = false;
+                const send = (r) => { if (done) return; done = true; reply(requestId, r === void 0 ? null : r); };
+                let pending = false;
+                for (const cb of listeners) {
+                  try {
+                    const ret = cb(message, sender, send);
+                    if (ret === true) pending = true;
+                    else if (ret && typeof ret.then === "function") { pending = true; ret.then(send, (e) => send({ error: String(e && e.message || e) })); }
+                  } catch (e) { console.error(e); }
+                }
+                if (!pending) send(void 0);
+              });
+            };
+            rt.onMessageExternal = {
+              addListener(cb) { listeners.add(cb); wire(); },
+              removeListener(cb) { listeners.delete(cb); },
+              hasListener(cb) { return listeners.has(cb); },
+              hasListeners() { return listeners.size > 0; },
+            };
+            if (!rt.onConnectExternal) rt.onConnectExternal = new GoatLocalEvent();
+            return rt;
+          },
+        };
+      }
       Object.assign(apiDefinitions, {
         privacy: {
           shouldInject: () => goatHasPermission("privacy"),
@@ -300,5 +387,15 @@ const preloadEdits = [
 ];
 
 const changed = patchFile('cjs/index.js', mainEdits); // Goat loads the CommonJS build
+// An older version of Goat's shims may already be in the file: take it out first, so
+// re-running this script after the shims change replaces them instead of adding a copy.
+{
+  const pp = path.join(root, 'chrome-extension-api.preload.js');
+  const cur = fs.readFileSync(pp, 'utf8');
+  if (!cur.includes(SHIMS) || cur.split("goat: stand-ins for APIs Electron doesn't implement").length > 2) {
+    const cleaned = cur.replace(/\n {6}\/\/ goat: stand-ins for APIs Electron doesn't implement[\s\S]*?(?= {6}Object\.keys\(apiDefinitions\)\.forEach)/g, '\n');
+    if (cleaned !== cur) fs.writeFileSync(pp, cleaned);
+  }
+}
 const changedPreload = patchFile('chrome-extension-api.preload.js', preloadEdits);
 console.log(`patch-extensions: ${changed || changedPreload ? 'applied' : 'already applied'}`);
